@@ -1,0 +1,1365 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.1
+  name: virtualmachinebuilds.ruddervirt.io
+spec:
+  group: ruddervirt.io
+  names:
+    kind: VirtualMachineBuild
+    listKind: VirtualMachineBuildList
+    plural: virtualmachinebuilds
+    shortNames:
+    - vmb
+    singular: virtualmachinebuild
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.buildID
+      name: Build-ID
+      type: string
+    - jsonPath: .status.vmStatuses[*].name
+      name: VMs
+      priority: 1
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          VirtualMachineBuild is the Schema for the virtualmachinebuilds API.
+          It defines a multi-VM image build pipeline with KubeOVN networking.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired state of VirtualMachineBuild.
+            properties:
+              buildOverrides:
+                description: |-
+                  buildOverrides applies settings that take effect ONLY during the build phase.
+                  The base spec fields (spec.network.vpcs, spec.vms[].resources) are what
+                  gets captured in the template for clones. Overrides let the build phase
+                  differ from the clone phase — for example, a build can have internet access
+                  while clones don't, or a build can use extra CPU for compilation.
+                properties:
+                  subnets:
+                    description: |-
+                      subnets overrides per-subnet settings during the build phase only.
+                      Each entry must match a subnet name in spec.network.subnets[].
+                    items:
+                      description: SubnetOverride overrides subnet settings during
+                        the build phase only.
+                      properties:
+                        name:
+                          description: name must match a subnet name in spec.network.subnets[].
+                          type: string
+                        unmanaged:
+                          description: |-
+                            unmanaged overrides the subnet's unmanaged setting during the build
+                            phase. The base spec.network.subnets[].unmanaged value is what clones
+                            inherit. Set this to false to realize a segment as MANAGED during the
+                            build (OVN DHCP + relay reachability) while keeping it unmanaged for
+                            clones: a guest-served (unmanaged) segment has no DHCP during its own
+                            build because the guest gateway that will serve it doesn't exist yet,
+                            so build-time provisioning (config fetch, SSH file provisioners) has
+                            nothing to lease from. Overriding it managed lets provisioning ride
+                            the normal OVN path; the guest then owns the segment once cloned.
+                          type: boolean
+                      required:
+                      - name
+                      type: object
+                    type: array
+                  vms:
+                    description: |-
+                      vms overrides per-VM settings during the build phase only.
+                      Each entry must match a VM name in spec.vms[].
+                    items:
+                      description: BuildVMOverride overrides per-VM settings during
+                        the build phase only.
+                      properties:
+                        name:
+                          description: name must match a VM name in spec.vms[].
+                          type: string
+                        nics:
+                          description: |-
+                            nics overrides the VM's NIC list during the build phase only.
+                            When non-empty, fully replaces spec.vms[].nics for the build VM —
+                            the base list is still what gets captured into the template and
+                            inherited by clones. Use this to attach build-only NICs (e.g., a
+                            provisioning subnet with internet) without leaking them downstream.
+                          items:
+                            description: VMNIC defines a NIC assignment for a VM,
+                              connecting it to a subnet.
+                            properties:
+                              ip:
+                                description: ip is an optional static IP address.
+                                  If omitted on a DHCP subnet, auto-assigned.
+                                type: string
+                              mac:
+                                description: mac is an optional static MAC address.
+                                type: string
+                              model:
+                                default: e1000
+                                description: |-
+                                  model is the libvirt NIC model exposed to the guest. Defaults to
+                                  e1000 because every modern guest OS ships an in-box driver for it,
+                                  avoiding the need to side-load netkvm during Windows install or to
+                                  rely on virtio support in older guests. Switch to virtio for higher
+                                  throughput once the guest has the netkvm/virtio_net driver loaded.
+                                enum:
+                                - virtio
+                                - e1000
+                                - e1000e
+                                - rtl8139
+                                - pcnet
+                                - ne2k_pci
+                                type: string
+                              name:
+                                description: |-
+                                  name is a label for this NIC. It's used to key the VMI interface
+                                  and network entries against each other but does not control the
+                                  in-guest interface name or the PCI placement; pin slot for that.
+                                pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
+                                type: string
+                              slot:
+                                description: |-
+                                  slot pins the NIC to a specific PCI slot on the VM, so the same
+                                  logical NIC keeps the same PCI address across the base build and
+                                  every downstream build that reuses the image. Without this, the
+                                  guest sees "new" hardware whenever a downstream spec reorders the
+                                  NIC list, and persisted per-adapter state (Windows adapter rename,
+                                  static IP, DHCPServer binding, AD DNS binding) lands on the wrong
+                                  interface. The PCI address is computed from the slot by Aileron.
+                                maximum: 9
+                                minimum: 1
+                                type: integer
+                              subnet:
+                                description: subnet is the name of the subnet to connect
+                                  to.
+                                type: string
+                            required:
+                            - name
+                            - subnet
+                            type: object
+                          type: array
+                        resources:
+                          description: |-
+                            resources overrides the VM's compute resources during the build phase.
+                            The base spec.vms[].resources value is what clones inherit.
+                          properties:
+                            cpu:
+                              default: 2
+                              description: cpu is the number of CPU cores. Defaults
+                                to 2.
+                              format: int32
+                              type: integer
+                            memory:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              default: 4Gi
+                              description: memory is the amount of RAM. Defaults to
+                                "4Gi".
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                          type: object
+                      required:
+                      - name
+                      type: object
+                    type: array
+                  vpcs:
+                    description: |-
+                      vpcs overrides per-VPC settings during the build phase only.
+                      Each entry must match a VPC name in spec.network.vpcs[].
+                    items:
+                      description: VPCOverride overrides VPC settings during the build
+                        phase only.
+                      properties:
+                        internet:
+                          description: |-
+                            internet overrides the VPC's internet setting during the build phase.
+                            The base spec.network.vpcs[].internet value is what clones inherit.
+                          type: boolean
+                        name:
+                          description: name must match a VPC name in spec.network.vpcs[].
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    type: array
+                type: object
+              files:
+                description: |-
+                  files defines named files that can be referenced by httpDirectory, floppy,
+                  or file provisioners. Supports inline content and URL sources.
+                items:
+                  description: |-
+                    BuildFile defines a named file that can be referenced by httpDirectory,
+                    floppy, or file provisioners. Exactly one of inline or url must be set.
+                  properties:
+                    inline:
+                      description: inline provides the file content directly as a
+                        string.
+                      type: string
+                    name:
+                      description: |-
+                        name is the unique identifier for this file within the build and is
+                        ALSO the filename used downstream (the path on the floppy disk and
+                        the URL path served by httpDirectory). Use a fully-qualified
+                        filename with extension (e.g. "Autounattend.xml", "netkvm.inf",
+                        "preseed.cfg"). Referenced by httpDirectory.files, floppy.files,
+                        and file provisioner fileRef.
+                      minLength: 1
+                      type: string
+                    url:
+                      description: url is an HTTP/HTTPS URL to download the file from
+                        at build time.
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
+              httpDirectory:
+                description: |-
+                  httpDirectory references a ConfigMap whose data keys are served via HTTP
+                  to build VMs during boot. Use {{ .HTTPIP }} and {{ .HTTPPort }} in
+                  bootCommand strings to reference the server.
+                properties:
+                  files:
+                    description: files references files from spec.files to serve via
+                      HTTP.
+                    items:
+                      description: |-
+                        HttpDirectoryFileRef references a file to serve via HTTP.
+                        The referenced file's name (from spec.files) is also the URL path it's
+                        served at, so file names should be fully-qualified filenames
+                        (e.g., "preseed.cfg").
+                      properties:
+                        name:
+                          description: |-
+                            name references a file in spec.files by name. The name is used
+                            as-is for the URL path.
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    minItems: 1
+                    type: array
+                required:
+                - files
+                type: object
+              isoCacheTTL:
+                description: |-
+                  isoCacheTTL is how long imported ISO PVCs are kept before cleanup.
+                  Defaults to 24h.
+                type: string
+              namespace:
+                description: |-
+                  namespace overrides the auto-generated child namespace name.
+                  When set, the controller uses this namespace and skips deletion on cleanup.
+                type: string
+              namespacePrefix:
+                default: vm-
+                description: |-
+                  namespacePrefix is the prefix for the auto-generated child namespace.
+                  The generated name is {prefix}{uid-hash} (e.g. "vm-a3f8b2c1").
+                  Defaults to "vm-".
+                type: string
+              network:
+                description: |-
+                  network defines the KubeOVN network topology (VPCs, subnets) for the build.
+                  Per-VM NIC assignments are defined on each VM in spec.vms[].nics[].
+                properties:
+                  subnets:
+                    description: subnets defines the subnets within VPCs.
+                    items:
+                      description: Subnet defines a KubeOVN subnet within a VPC.
+                      properties:
+                        cidr:
+                          description: cidr is the IPv4 CIDR block (e.g. "10.0.1.0/24").
+                            Required.
+                          pattern: ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$
+                          type: string
+                        dhcp:
+                          default: true
+                          description: |-
+                            dhcp enables KubeOVN DHCP on this subnet. Defaults to true.
+                            Ignored when unmanaged is true (the guest owns DHCP).
+                          type: boolean
+                        dns:
+                          description: |-
+                            dns overrides DNS server addresses for DHCP (e.g. "10.0.1.1" or "10.0.1.1,10.0.1.2").
+                            When spec.internet is true the default is public DNS; otherwise there is no default.
+                          type: string
+                        name:
+                          description: name is the subnet identifier, referenced by
+                            VM NIC assignments.
+                          pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
+                          type: string
+                        unmanaged:
+                          description: |-
+                            unmanaged turns this subnet into a bare L2 segment owned by a guest
+                            gateway VM (e.g. pfSense or a Windows DC serving DHCP). The operator
+                            still realizes the subnet as an OVN logical switch - that's what
+                            gives us cross-node L2, VPC isolation, and OVS forwarding that
+                            bypasses iptables - but: OVN's DHCP is turned off, NICs attach via
+                            the l2bridge (managedTap) binding so virt-launcher serves no DHCP
+                            either, the gateway health check is skipped, and KubeOVN's mandatory
+                            gateway router port is relocated to the SECOND-TO-LAST usable IP of
+                            the CIDR (e.g. .253 in a /24) so it cannot shadow the guest gateway
+                            at the first usable IP. OVN IPAM stays on (KubeOVN requires every
+                            port to have an IP) but the allocations are inert; the first usable
+                            IP is excluded so the guest gateway's address is never handed out.
+
+                            Constraints: the CIDR must be /29 or wider; the guest's DHCP pool
+                            must not include the relocated OVN gateway (second-to-last usable
+                            IP); declare the CIDR equal to the range the guest gateway actually
+                            serves so the ovn40subnets ipset entry matches real traffic; dns has
+                            no effect on unmanaged subnets (the guest provides it).
+                          type: boolean
+                        vpc:
+                          description: |-
+                            vpc is the name of the VPC this subnet belongs to.
+                            If omitted, the subnet is placed in the auto-created VPC.
+                          type: string
+                      required:
+                      - cidr
+                      - name
+                      type: object
+                    type: array
+                  vpcs:
+                    description: vpcs defines the virtual private clouds for the operation.
+                    items:
+                      description: |-
+                        VPC defines a KubeOVN VPC. Most operations don't need to declare VPCs
+                        explicitly — one is auto-created per operation. Use this only when you need
+                        multiple isolated VPCs within a single operation.
+                      properties:
+                        internet:
+                          default: false
+                          description: |-
+                            internet enables NAT egress and public DNS (8.8.8.8, 1.1.1.1) for this VPC.
+                            Overridden to false when spec.internet is false.
+                          type: boolean
+                        name:
+                          description: name is the VPC identifier, referenced by subnets.
+                          pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    type: array
+                type: object
+              output:
+                description: output is DEPRECATED and ignored. All VMs are automatically
+                  captured.
+                properties:
+                  vms:
+                    description: vms maps each build VM to its output artifact.
+                    items:
+                      description: VMOutput defines the output artifact for a single
+                        VM.
+                      properties:
+                        dataVolume:
+                          description: dataVolume configures the output DataVolume/PVC
+                            for this VM.
+                          properties:
+                            accessModes:
+                              description: accessModes for the output PVC.
+                              items:
+                                type: string
+                              type: array
+                            name:
+                              description: name of the output DataVolume.
+                              type: string
+                            namespace:
+                              description: namespace of the output DataVolume. Defaults
+                                to the build's namespace.
+                              type: string
+                            storageClass:
+                              description: storageClass for the output DataVolume.
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        name:
+                          description: name must match a VM name in spec.vms[].
+                          type: string
+                        s3Export:
+                          description: s3Export optionally exports this VM's disk
+                            image to S3.
+                          properties:
+                            bucket:
+                              description: bucket is the S3 bucket name.
+                              type: string
+                            credentialsSecret:
+                              description: credentialsSecret references a Secret with
+                                keys AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.
+                              properties:
+                                name:
+                                  default: ""
+                                  description: |-
+                                    Name of the referent.
+                                    This field is effectively required, but due to backwards compatibility is
+                                    allowed to be empty. Instances of this type with an empty value here are
+                                    almost certainly wrong.
+                                    More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                  type: string
+                              type: object
+                              x-kubernetes-map-type: atomic
+                            endpoint:
+                              description: endpoint is the S3 endpoint URL.
+                              type: string
+                            format:
+                              default: raw
+                              description: format is the disk image format to export.
+                                Defaults to "raw".
+                              enum:
+                              - raw
+                              - qcow2
+                              type: string
+                            key:
+                              description: key is the S3 object key (path) for the
+                                uploaded image.
+                              type: string
+                            region:
+                              description: region is the S3 region. Optional for non-AWS
+                                S3-compatible stores.
+                              type: string
+                          required:
+                          - bucket
+                          - credentialsSecret
+                          - endpoint
+                          - key
+                          type: object
+                      required:
+                      - dataVolume
+                      - name
+                      type: object
+                    minItems: 1
+                    type: array
+                required:
+                - vms
+                type: object
+              retries:
+                default: 0
+                description: retries is the number of times to retry the build on
+                  failure.
+                format: int32
+                type: integer
+              s3Export:
+                description: s3Export optionally exports all built VM disk images
+                  to S3.
+                properties:
+                  bucket:
+                    description: bucket is the S3 bucket name.
+                    type: string
+                  credentialsSecret:
+                    description: credentialsSecret references a Secret with keys AWS_ACCESS_KEY_ID
+                      and AWS_SECRET_ACCESS_KEY.
+                    properties:
+                      name:
+                        default: ""
+                        description: |-
+                          Name of the referent.
+                          This field is effectively required, but due to backwards compatibility is
+                          allowed to be empty. Instances of this type with an empty value here are
+                          almost certainly wrong.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  endpoint:
+                    description: endpoint is the S3 endpoint URL.
+                    type: string
+                  format:
+                    default: raw
+                    description: format is the disk image format to export. Defaults
+                      to "raw".
+                    enum:
+                    - raw
+                    - qcow2
+                    type: string
+                  key:
+                    description: key is the S3 object key (path) for the uploaded
+                      image.
+                    type: string
+                  region:
+                    description: region is the S3 region. Optional for non-AWS S3-compatible
+                      stores.
+                    type: string
+                required:
+                - bucket
+                - credentialsSecret
+                - endpoint
+                - key
+                type: object
+              timeout:
+                default: 30m
+                description: timeout is the maximum duration for the entire build.
+                  Defaults to "30m".
+                type: string
+              vms:
+                description: |-
+                  vms defines the VMs to build. All VMs boot and provision in parallel.
+                  VMs can communicate with each other by name over the defined network.
+                items:
+                  description: BuildVM defines a single VM within a multi-VM build.
+                  properties:
+                    bootCommand:
+                      description: |-
+                        bootCommand sends keystrokes to the VM via VNC console before provisioning.
+                        Uses Packer-compatible syntax: <enter>, <tab>, <wait>, <wait5>, etc.
+                      items:
+                        type: string
+                      type: array
+                    cloudInit:
+                      description: |-
+                        cloudInit enables cloud-init and defines its configuration for this VM.
+                        When set to true (or with configuration), a cloud-init disk is attached.
+                      properties:
+                        networkData:
+                          description: networkData is inline cloud-init network-data.
+                          type: string
+                        userData:
+                          description: userData is inline cloud-init user-data (cloud-config
+                            format).
+                          type: string
+                        userDataFrom:
+                          description: userDataFrom references a ConfigMap or Secret
+                            containing user-data.
+                          properties:
+                            configMapRef:
+                              description: configMapRef references a ConfigMap key.
+                              properties:
+                                key:
+                                  description: The key to select.
+                                  type: string
+                                name:
+                                  default: ""
+                                  description: |-
+                                    Name of the referent.
+                                    This field is effectively required, but due to backwards compatibility is
+                                    allowed to be empty. Instances of this type with an empty value here are
+                                    almost certainly wrong.
+                                    More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                  type: string
+                                optional:
+                                  description: Specify whether the ConfigMap or its
+                                    key must be defined
+                                  type: boolean
+                              required:
+                              - key
+                              type: object
+                              x-kubernetes-map-type: atomic
+                            secretRef:
+                              description: secretRef references a Secret key.
+                              properties:
+                                key:
+                                  description: The key of the secret to select from.  Must
+                                    be a valid secret key.
+                                  type: string
+                                name:
+                                  default: ""
+                                  description: |-
+                                    Name of the referent.
+                                    This field is effectively required, but due to backwards compatibility is
+                                    allowed to be empty. Instances of this type with an empty value here are
+                                    almost certainly wrong.
+                                    More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                  type: string
+                                optional:
+                                  description: Specify whether the Secret or its key
+                                    must be defined
+                                  type: boolean
+                              required:
+                              - key
+                              type: object
+                              x-kubernetes-map-type: atomic
+                          type: object
+                      type: object
+                    communicator:
+                      description: communicator configures how to connect to this
+                        VM for provisioning.
+                      properties:
+                        shell:
+                          default: bash
+                          description: |-
+                            shell is the guest shell type. Determines how files are uploaded and
+                            scripts are executed. "bash" for POSIX systems (Linux, BSD, macOS),
+                            "powershell" for Windows. Defaults to "bash".
+                          enum:
+                          - bash
+                          - powershell
+                          type: string
+                        sshPassword:
+                          description: |-
+                            sshPassword is the password for SSH authentication.
+                            When set, password auth is used instead of (or in addition to) key auth.
+                          type: string
+                        sshPort:
+                          default: 22
+                          description: sshPort is the SSH port. Defaults to 22.
+                          format: int32
+                          type: integer
+                        sshPrivateKeySecret:
+                          description: |-
+                            sshPrivateKeySecret references a Secret containing a pre-existing SSH private key.
+                            If not set, a keypair is auto-generated per build.
+                          properties:
+                            key:
+                              description: key within the Secret data.
+                              type: string
+                            name:
+                              description: name of the Secret.
+                              type: string
+                          required:
+                          - key
+                          - name
+                          type: object
+                        sshTimeout:
+                          description: |-
+                            sshTimeout is how long to wait for SSH to become available before failing.
+                            Increase this for ISO installs that take longer to complete. Defaults to "5m".
+                          type: string
+                        sshUsername:
+                          default: root
+                          description: sshUsername is the user to SSH as. Defaults
+                            to "root".
+                          type: string
+                        type:
+                          default: ssh
+                          description: type is the communicator type. Currently only
+                            "ssh" is supported.
+                          enum:
+                          - ssh
+                          type: string
+                      type: object
+                    disks:
+                      description: |-
+                        disks defines the disks attached to this VM.
+                        For url/sourcePvc/containerDisk/blank sources, the first disk is the boot
+                        disk and receives the source image; additional disks are created blank.
+                        For a buildRef source the boot disk is inherited from the parent build, so
+                        every disk listed here is treated as an additional blank data disk.
+                        If empty, a single 20Gi virtio disk is created.
+                      items:
+                        description: |-
+                          BuildDisk defines a disk attached to a build VM.
+                          The first disk is the boot disk and receives the source image.
+                          Additional disks are created blank.
+                        properties:
+                          bus:
+                            default: virtio
+                            description: |-
+                              bus is the disk bus type. Defaults to "virtio".
+                              "usb" presents the disk to the guest as a removable (non-fixed) drive,
+                              which Windows reports as removable media; it is not bootable and is
+                              slower than virtio, so use it only for data/transfer disks.
+                            enum:
+                            - virtio
+                            - scsi
+                            - sata
+                            - usb
+                            type: string
+                          name:
+                            description: name is the disk identifier within the VM.
+                            pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
+                            type: string
+                          size:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            description: size is the disk capacity (e.g., "25Gi").
+                            pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                            x-kubernetes-int-or-string: true
+                          storageClass:
+                            description: storageClass overrides the default StorageClass
+                              for this disk.
+                            type: string
+                        required:
+                        - name
+                        - size
+                        type: object
+                      type: array
+                    efiFirmware:
+                      description: efiFirmware enables UEFI boot with custom OVMF
+                        firmware.
+                      properties:
+                        secureBoot:
+                          description: secureBoot enables UEFI Secure Boot. Defaults
+                            to false.
+                          type: boolean
+                      type: object
+                    floppy:
+                      description: floppy attaches a floppy disk containing files
+                        from spec.files.
+                      properties:
+                        files:
+                          description: files references files from spec.files to include
+                            on the floppy disk.
+                          items:
+                            description: |-
+                              FloppyFileRef references a file to include on the floppy disk.
+                              The referenced file's name (from spec.files) is also the filename written
+                              to the floppy, so file names should be fully-qualified filenames
+                              (e.g., "Autounattend.xml", "netkvm.inf").
+                            properties:
+                              name:
+                                description: |-
+                                  name references a file in spec.files by name. The name is used
+                                  as-is for the filename on the floppy disk.
+                                type: string
+                            required:
+                            - name
+                            type: object
+                          minItems: 1
+                          type: array
+                      required:
+                      - files
+                      type: object
+                    isos:
+                      description: |-
+                        isos defines ISO images to attach as cdrom devices.
+                        ISOs are cached as ReadOnlyMany PVCs and shared across builds.
+                      items:
+                        description: |-
+                          ISOSource defines an ISO image to attach as a cdrom device.
+                          ISOs are imported once and cached as ReadOnlyMany PVCs keyed by checksum.
+                        properties:
+                          checksum:
+                            description: |-
+                              checksum is an optional SHA-256 hex digest of the ISO for cache keying and verification.
+                              If omitted, the SHA-256 hash of the URL is used as the cache key.
+                            pattern: ^[a-fA-F0-9]{64}$
+                            type: string
+                          url:
+                            description: url is an HTTP/HTTPS URL to an ISO image.
+                            minLength: 1
+                            type: string
+                        required:
+                        - url
+                        type: object
+                      type: array
+                    name:
+                      description: |-
+                        name is the unique identifier for this VM within the build.
+                        Used for DNS resolution between VMs (e.g., other VMs can reach this one by name).
+                      pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
+                      type: string
+                    nics:
+                      description: nics defines the network interfaces for this VM.
+                      items:
+                        description: VMNIC defines a NIC assignment for a VM, connecting
+                          it to a subnet.
+                        properties:
+                          ip:
+                            description: ip is an optional static IP address. If omitted
+                              on a DHCP subnet, auto-assigned.
+                            type: string
+                          mac:
+                            description: mac is an optional static MAC address.
+                            type: string
+                          model:
+                            default: e1000
+                            description: |-
+                              model is the libvirt NIC model exposed to the guest. Defaults to
+                              e1000 because every modern guest OS ships an in-box driver for it,
+                              avoiding the need to side-load netkvm during Windows install or to
+                              rely on virtio support in older guests. Switch to virtio for higher
+                              throughput once the guest has the netkvm/virtio_net driver loaded.
+                            enum:
+                            - virtio
+                            - e1000
+                            - e1000e
+                            - rtl8139
+                            - pcnet
+                            - ne2k_pci
+                            type: string
+                          name:
+                            description: |-
+                              name is a label for this NIC. It's used to key the VMI interface
+                              and network entries against each other but does not control the
+                              in-guest interface name or the PCI placement; pin slot for that.
+                            pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
+                            type: string
+                          slot:
+                            description: |-
+                              slot pins the NIC to a specific PCI slot on the VM, so the same
+                              logical NIC keeps the same PCI address across the base build and
+                              every downstream build that reuses the image. Without this, the
+                              guest sees "new" hardware whenever a downstream spec reorders the
+                              NIC list, and persisted per-adapter state (Windows adapter rename,
+                              static IP, DHCPServer binding, AD DNS binding) lands on the wrong
+                              interface. The PCI address is computed from the slot by Aileron.
+                            maximum: 9
+                            minimum: 1
+                            type: integer
+                          subnet:
+                            description: subnet is the name of the subnet to connect
+                              to.
+                            type: string
+                        required:
+                        - name
+                        - subnet
+                        type: object
+                      type: array
+                    provisioners:
+                      description: provisioners is an ordered list of provisioning
+                        steps for this VM.
+                      items:
+                        description: BuildProvisioner defines a single provisioning
+                          step.
+                        properties:
+                          file:
+                            description: file configures a file provisioner. Required
+                              when type is "file".
+                            properties:
+                              destination:
+                                description: destination is the absolute path on the
+                                  build VM to write the file.
+                                type: string
+                              fileRef:
+                                description: fileRef references a file in spec.files
+                                  by name.
+                                type: string
+                              source:
+                                description: source references the file content from
+                                  a ConfigMap or Secret.
+                                properties:
+                                  configMapRef:
+                                    description: configMapRef references a ConfigMap
+                                      key.
+                                    properties:
+                                      key:
+                                        description: The key to select.
+                                        type: string
+                                      name:
+                                        default: ""
+                                        description: |-
+                                          Name of the referent.
+                                          This field is effectively required, but due to backwards compatibility is
+                                          allowed to be empty. Instances of this type with an empty value here are
+                                          almost certainly wrong.
+                                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                        type: string
+                                      optional:
+                                        description: Specify whether the ConfigMap
+                                          or its key must be defined
+                                        type: boolean
+                                    required:
+                                    - key
+                                    type: object
+                                    x-kubernetes-map-type: atomic
+                                  secretRef:
+                                    description: secretRef references a Secret key.
+                                    properties:
+                                      key:
+                                        description: The key of the secret to select
+                                          from.  Must be a valid secret key.
+                                        type: string
+                                      name:
+                                        default: ""
+                                        description: |-
+                                          Name of the referent.
+                                          This field is effectively required, but due to backwards compatibility is
+                                          allowed to be empty. Instances of this type with an empty value here are
+                                          almost certainly wrong.
+                                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                        type: string
+                                      optional:
+                                        description: Specify whether the Secret or
+                                          its key must be defined
+                                        type: boolean
+                                    required:
+                                    - key
+                                    type: object
+                                    x-kubernetes-map-type: atomic
+                                type: object
+                            required:
+                            - destination
+                            type: object
+                          handbuild:
+                            description: handbuild configures a handbuild provisioner.
+                              Required when type is "handbuild".
+                            properties:
+                              instructions:
+                                description: |-
+                                  instructions describes what the human operator should do via VNC.
+                                  Displayed in the UI while the build is paused.
+                                type: string
+                            required:
+                            - instructions
+                            type: object
+                          name:
+                            description: name is an optional human-readable name for
+                              this step.
+                            type: string
+                          reboot:
+                            description: reboot configures a reboot provisioner. Optional
+                              when type is "reboot".
+                            properties:
+                              command:
+                                description: |-
+                                  command overrides the default reboot command.
+                                  Defaults to "shutdown /r /f /t 0" for PowerShell or "sudo reboot" for bash.
+                                type: string
+                            type: object
+                          shell:
+                            description: shell configures a shell provisioner. Required
+                              when type is "shell".
+                            properties:
+                              env:
+                                additionalProperties:
+                                  type: string
+                                description: env is a map of environment variables
+                                  to set before running commands.
+                                type: object
+                              executeCommand:
+                                description: |-
+                                  executeCommand overrides the default command wrapper.
+                                  Use {{ .Command }} as a placeholder for the actual command.
+                                type: string
+                              inline:
+                                description: inline is the script to run.
+                                type: string
+                              scriptFrom:
+                                description: scriptFrom references a script stored
+                                  in a ConfigMap or Secret.
+                                properties:
+                                  configMapRef:
+                                    description: configMapRef references a ConfigMap
+                                      key.
+                                    properties:
+                                      key:
+                                        description: The key to select.
+                                        type: string
+                                      name:
+                                        default: ""
+                                        description: |-
+                                          Name of the referent.
+                                          This field is effectively required, but due to backwards compatibility is
+                                          allowed to be empty. Instances of this type with an empty value here are
+                                          almost certainly wrong.
+                                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                        type: string
+                                      optional:
+                                        description: Specify whether the ConfigMap
+                                          or its key must be defined
+                                        type: boolean
+                                    required:
+                                    - key
+                                    type: object
+                                    x-kubernetes-map-type: atomic
+                                  secretRef:
+                                    description: secretRef references a Secret key.
+                                    properties:
+                                      key:
+                                        description: The key of the secret to select
+                                          from.  Must be a valid secret key.
+                                        type: string
+                                      name:
+                                        default: ""
+                                        description: |-
+                                          Name of the referent.
+                                          This field is effectively required, but due to backwards compatibility is
+                                          allowed to be empty. Instances of this type with an empty value here are
+                                          almost certainly wrong.
+                                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                        type: string
+                                      optional:
+                                        description: Specify whether the Secret or
+                                          its key must be defined
+                                        type: boolean
+                                    required:
+                                    - key
+                                    type: object
+                                    x-kubernetes-map-type: atomic
+                                type: object
+                            type: object
+                          stepTimeout:
+                            description: |-
+                              stepTimeout is the maximum duration for this step (e.g. "30m", "2h").
+                              If not set, the step runs until the build-level timeout expires.
+                            type: string
+                          type:
+                            description: 'type is the provisioner type: "shell", "file",
+                              "reboot", or "windows-update".'
+                            enum:
+                            - shell
+                            - file
+                            - reboot
+                            - windows-update
+                            - handbuild
+                            type: string
+                          windowsUpdate:
+                            description: windowsUpdate configures a Windows Update
+                              provisioner. Optional when type is "windows-update".
+                            properties:
+                              filters:
+                                description: |-
+                                  filters is a list of PowerShell filter expressions applied to each update.
+                                  Format: "include:EXPRESSION" or "exclude:EXPRESSION".
+                                  $_ is the IUpdate object. Evaluated in order; first match wins.
+                                  Example: ["exclude:$_.Title -like '*Preview*'", "include:$true"]
+                                items:
+                                  type: string
+                                type: array
+                              searchCriteria:
+                                description: |-
+                                  searchCriteria is the Windows Update Agent search string.
+                                  Defaults to "BrowseOnly=0 and IsInstalled=0" (recommended updates).
+                                  Common values:
+                                    "AutoSelectOnWebSites=1 and IsInstalled=0"  (important only)
+                                    "BrowseOnly=0 and IsInstalled=0"            (recommended, default)
+                                    "IsInstalled=0"                              (all available)
+                                type: string
+                              updateLimit:
+                                description: |-
+                                  updateLimit is the maximum number of updates to install per cycle
+                                  before rebooting. Defaults to 1000.
+                                type: integer
+                            type: object
+                        required:
+                        - type
+                        type: object
+                      type: array
+                    resources:
+                      description: resources defines compute resources for this VM.
+                      properties:
+                        cpu:
+                          default: 2
+                          description: cpu is the number of CPU cores. Defaults to
+                            2.
+                          format: int32
+                          type: integer
+                        memory:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          default: 4Gi
+                          description: memory is the amount of RAM. Defaults to "4Gi".
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                      type: object
+                    source:
+                      description: source defines the base disk image for this VM.
+                      properties:
+                        blank:
+                          description: blank creates an empty disk. Use this with
+                            isos for OS installation from ISO media.
+                          type: boolean
+                        buildRef:
+                          description: |-
+                            buildRef references the output of a previous VirtualMachineBuild.
+                            The referenced build must be in Succeeded phase; the build fails immediately if it is not.
+                          properties:
+                            name:
+                              description: name is the name of the VirtualMachineBuild
+                                to source from.
+                              type: string
+                            namespace:
+                              description: namespace of the VirtualMachineBuild. Defaults
+                                to the current build's namespace.
+                              type: string
+                            vmName:
+                              description: |-
+                                vmName is the name of the VM within the referenced build whose output disk to use.
+                                Required when the referenced build has multiple VMs.
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        containerDisk:
+                          description: containerDisk is a container image reference
+                            containing a disk image.
+                          type: string
+                        sourcePvc:
+                          description: sourcePVC references an existing PVC containing
+                            a base disk image.
+                          properties:
+                            name:
+                              description: name of the PVC.
+                              type: string
+                            namespace:
+                              description: namespace of the PVC.
+                              type: string
+                          required:
+                          - name
+                          - namespace
+                          type: object
+                        url:
+                          description: url is an HTTP/HTTPS URL to a disk image. CDI
+                            will import it.
+                          type: string
+                      type: object
+                  required:
+                  - name
+                  - source
+                  type: object
+                minItems: 1
+                type: array
+            required:
+            - vms
+            type: object
+          status:
+            description: status defines the observed state of VirtualMachineBuild.
+            properties:
+              buildID:
+                description: |-
+                  buildID is the unique identifier for this build's resources.
+                  All resources created by this build are prefixed with this ID and labeled
+                  with ruddervirt.io/build-id for cleanup. Generated once on first reconcile.
+                type: string
+              buildNamespace:
+                description: |-
+                  buildNamespace is the Kubernetes namespace where build resources are created.
+                  Defaults to the operator namespace (ruddervirt-system).
+                type: string
+              completionTime:
+                description: completionTime is when the build finished.
+                format: date-time
+                type: string
+              conditions:
+                description: conditions represent the latest available observations.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              message:
+                description: message is a human-readable summary of the build state.
+                type: string
+              network:
+                description: network records the state of network resources.
+                properties:
+                  ready:
+                    description: ready indicates all network resources are available.
+                    type: boolean
+                  subnetsCreated:
+                    description: subnetsCreated lists the KubeOVN Subnet names created
+                      for this build.
+                    items:
+                      type: string
+                    type: array
+                  vpcsCreated:
+                    description: vpcsCreated lists the KubeOVN VPC names created for
+                      this build.
+                    items:
+                      type: string
+                    type: array
+                required:
+                - ready
+                type: object
+              phase:
+                description: phase is the overall build phase.
+                enum:
+                - Pending
+                - Networking
+                - Building
+                - CapturingDisks
+                - Exporting
+                - TemplateProvisioning
+                - Succeeded
+                - Failed
+                type: string
+              retryCount:
+                description: retryCount is the number of retries attempted.
+                format: int32
+                type: integer
+              s3Exports:
+                description: s3Exports records the state of S3 exports.
+                items:
+                  description: S3ExportStatus records the state of an S3 export.
+                  properties:
+                    checksum:
+                      description: checksum is the SHA-256 checksum of the uploaded
+                        image.
+                      type: string
+                    location:
+                      description: location is the full S3 URI.
+                      type: string
+                    uploaded:
+                      description: uploaded indicates whether the upload completed.
+                      type: boolean
+                    vmName:
+                      description: vmName is the VM this export belongs to.
+                      type: string
+                  required:
+                  - uploaded
+                  - vmName
+                  type: object
+                type: array
+              startTime:
+                description: startTime is when the build started.
+                format: date-time
+                type: string
+              templateNamespace:
+                description: |-
+                  templateNamespace is the namespace containing output PVCs and halted template VMs.
+                  After a successful build this equals buildNamespace (the build namespace becomes the template namespace).
+                type: string
+              virtualMachineNamespace:
+                description: |-
+                  virtualMachineNamespace is the name of the VirtualMachineNamespace CR
+                  that logically groups this build's resources.
+                type: string
+              vmStatuses:
+                description: vmStatuses tracks the state of each VM in the build.
+                items:
+                  description: VMBuildStatus tracks the state of a single VM within
+                    the build.
+                  properties:
+                    message:
+                      description: message is a human-readable status message.
+                      type: string
+                    name:
+                      description: name is the VM name (matches spec.vms[].name).
+                      type: string
+                    outputDataVolume:
+                      description: outputDataVolume is the namespace/name of the output
+                        DataVolume.
+                      type: string
+                    phase:
+                      description: phase is the current phase of this VM's build.
+                      enum:
+                      - Pending
+                      - SourceImporting
+                      - Booting
+                      - BootCommand
+                      - Provisioning
+                      - ShuttingDown
+                      - DiskCaptured
+                      - Succeeded
+                      - Failed
+                      type: string
+                    provisionerResults:
+                      description: provisionerResults records the outcome of each
+                        provisioner step for this VM.
+                      items:
+                        description: ProvisionerResult records the outcome of a single
+                          provisioner step.
+                        properties:
+                          duration:
+                            description: duration is how long this step took.
+                            type: string
+                          index:
+                            description: index is the position in the provisioners
+                              list.
+                            format: int32
+                            type: integer
+                          message:
+                            description: message contains error details on failure.
+                            type: string
+                          name:
+                            description: name is the provisioner name (if set).
+                            type: string
+                          status:
+                            description: 'status is the result: Pending, Running,
+                              Succeeded, or Failed.'
+                            type: string
+                          type:
+                            description: type is the provisioner type.
+                            enum:
+                            - shell
+                            - file
+                            - reboot
+                            - windows-update
+                            - handbuild
+                            type: string
+                        required:
+                        - index
+                        - type
+                        type: object
+                      type: array
+                    vmName:
+                      description: vmName is the name of the ephemeral KubeVirt VM.
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

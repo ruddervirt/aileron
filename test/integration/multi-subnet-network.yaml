@@ -1,0 +1,58 @@
+apiVersion: ruddervirt.io/v1alpha1
+kind: VirtualMachineBuild
+metadata:
+  name: test-multi-subnet
+  namespace: ruddervirt-system
+spec:
+  network:
+    vpcs:
+      - name: vpc
+        internet: true
+    subnets:
+      - name: mgmt
+        vpc: vpc
+        cidr: "10.0.0.0/24"
+        dhcp: true
+        dns: "8.8.8.8,1.1.1.1"
+      - name: data
+        vpc: vpc
+        cidr: "10.0.1.0/24"
+        dhcp: false
+
+  vms:
+    - name: multi-nic
+      source:
+        url: "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2"
+      resources:
+        cpu: 1
+        memory: "1Gi"
+      disks:
+        - name: rootdisk
+          size: "4Gi"
+      communicator:
+        sshUsername: debian
+      cloudInit:
+        userData: |
+          #cloud-config
+          ssh_authorized_keys: []
+      nics:
+        - name: eth0
+          subnet: mgmt
+        - name: eth1
+          subnet: data
+          ip: "10.0.1.50"
+          mac: "52:54:00:ab:cd:ef"
+      provisioners:
+        - type: shell
+          name: verify-interfaces
+          shell:
+            inline:
+              - echo "=== Multi-NIC VM ==="
+              - ip -brief addr show
+              - ip -brief link show
+              - echo "--- Checking for static IP 10.0.1.50 ---"
+              - "ip addr show | grep '10.0.1.50' && echo 'Static IP verified'"
+              - echo "--- Checking for static MAC 52:54:00:ab:cd:ef ---"
+              - "ip link show | grep '52:54:00:ab:cd:ef' && echo 'Static MAC verified'"
+
+  timeout: 30m

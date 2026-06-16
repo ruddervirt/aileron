@@ -1,0 +1,10 @@
+---
+# Clone test: clones the file-provisioner build and verifies VMs are created.
+apiVersion: ruddervirt.io/v1alpha1
+kind: VirtualMachineClone
+metadata:
+  name: clone-file-prov
+  namespace: ruddervirt-system
+spec:
+  templateName: test-file-prov
+  timeout: 30m

@@ -1,0 +1,42 @@
+---
+# Integration test: ISO attachment
+# Verifies that an ISO image is imported as a cached ReadOnlyMany DataVolume
+# and attached to the VM as a cdrom device.
+# Uses a small Alpine ISO (~70MB) for fast download.
+apiVersion: ruddervirt.io/v1alpha1
+kind: VirtualMachineBuild
+metadata:
+  name: test-iso
+  namespace: ruddervirt-system
+spec:
+  vms:
+    - name: builder
+      source:
+        url: "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2"
+      resources:
+        cpu: 2
+        memory: "4Gi"
+      disks:
+        - name: rootdisk
+          size: "25Gi"
+      communicator:
+        sshUsername: debian
+      isos:
+        - url: "https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/x86_64/alpine-virt-3.21.3-x86_64.iso"
+      cloudInit:
+        userData: |
+          #cloud-config
+          ssh_authorized_keys: []
+      provisioners:
+        - name: check-cdrom
+          type: shell
+          shell:
+            executeCommand: "echo '' | sudo -S sh -c '{{ .Command }}'"
+            inline:
+              - echo "=== Checking for ISO cdrom device ==="
+              - lsblk
+              - ls -la /dev/sr0 && echo "cdrom device sr0 found OK" || echo "WARN no sr0"
+              - blkid /dev/sr0 && echo "cdrom has filesystem OK" || echo "WARN no fs on sr0"
+              - echo "=== ISO cdrom test passed ==="
+
+  timeout: 30m

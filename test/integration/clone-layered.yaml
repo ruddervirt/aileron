@@ -1,0 +1,10 @@
+---
+# Clone test: clones the layered build and verifies VMs are created.
+apiVersion: ruddervirt.io/v1alpha1
+kind: VirtualMachineClone
+metadata:
+  name: clone-layered
+  namespace: ruddervirt-system
+spec:
+  templateName: test-layered
+  timeout: 30m

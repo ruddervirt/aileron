@@ -1,0 +1,131 @@
+name: release
+
+on:
+    push:
+        tags:
+            - "v*"
+
+env:
+    IMAGE_REPO: ghcr.io/${{ github.repository }}
+
+jobs:
+    lint:
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-go@v5
+              with:
+                  go-version-file: go.mod
+                  cache-dependency-path: go.sum
+            - name: Cache golangci-lint analysis
+              uses: actions/cache@v4
+              with:
+                  path: ~/.cache/golangci-lint
+                  key: golangci-lint-${{ runner.os }}-${{ hashFiles('.golangci.yml', 'go.sum') }}
+                  restore-keys: |
+                      golangci-lint-${{ runner.os }}-
+            - run: make lint
+
+    test:
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-go@v5
+              with:
+                  go-version-file: go.mod
+                  cache-dependency-path: go.sum
+            - name: Cache envtest assets
+              uses: actions/cache@v4
+              with:
+                  path: bin/k8s
+                  key: envtest-${{ runner.os }}-1.36.0
+            - run: make test
+
+    e2e:
+        runs-on: ubuntu-latest
+        timeout-minutes: 20
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-go@v5
+              with:
+                  go-version-file: go.mod
+                  cache-dependency-path: go.sum
+            - uses: helm/kind-action@v1
+              with:
+                  install_only: true
+            - run: make test-e2e
+
+    publish:
+        needs: [lint, test, e2e]
+        runs-on: ubuntu-latest
+        timeout-minutes: 30
+        permissions:
+            packages: write
+            contents: write # for creating the GitHub Release
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-go@v5
+              with:
+                  go-version-file: go.mod
+                  cache-dependency-path: go.sum
+
+            - name: Determine versions
+              id: ver
+              run: |
+                  image_tag="${GITHUB_REF_NAME}"          # e.g. v1.2.3
+                  chart_version="${image_tag#v}"          # e.g. 1.2.3 (Helm chart version must be semver)
+                  echo "image_tag=${image_tag}" >> "$GITHUB_OUTPUT"
+                  echo "chart_version=${chart_version}" >> "$GITHUB_OUTPUT"
+
+            - uses: docker/setup-buildx-action@v3
+
+            - uses: docker/login-action@v3
+              with:
+                  registry: ghcr.io
+                  username: ${{ github.actor }}
+                  password: ${{ secrets.GITHUB_TOKEN }}
+
+            - name: Build and push versioned images
+              env:
+                  TAG: ${{ steps.ver.outputs.image_tag }}
+                  BAKE_FILES: -f docker-bake.hcl -f docker-bake.ci.hcl
+              run: make push
+
+            - name: Helm registry login
+              run: helm registry login ghcr.io -u ${{ github.actor }} -p ${{ secrets.GITHUB_TOKEN }}
+
+            - name: Package and push versioned OCI chart
+              env:
+                  CHART_VERSION: ${{ steps.ver.outputs.chart_version }}
+                  APP_VERSION: ${{ steps.ver.outputs.image_tag }}
+                  HELM_OCI_REPO: oci://ghcr.io/${{ github.repository_owner }}/charts
+              run: make helm-publish
+
+            - name: Bundle CRDs
+              run: |
+                  mkdir -p dist
+                  cat config/crd/bases/*.yaml > dist/aileron-crds.yaml
+
+            - name: Create GitHub Release
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  TAG: ${{ steps.ver.outputs.image_tag }}
+                  CHART_VERSION: ${{ steps.ver.outputs.chart_version }}
+                  OWNER: ${{ github.repository_owner }}
+              run: |
+                  # printf (not a heredoc) so the literal backticks/markdown fence in
+                  # the body are not treated as command substitution by the shell.
+                  printf '## Deploy\n\nImages: `%s*:%s`. Chart: `oci://ghcr.io/%s/charts/aileron` (version `%s`).\n\nIn a deployment zone:\n\n```\nhelm upgrade --install aileron oci://ghcr.io/%s/charts/aileron --version %s -n ruddervirt-system --create-namespace --take-ownership -f zone-values.yaml --wait\n```\n\n## CRDs\n\nApply the operator CRDs for this release without the chart:\n\n```\nkubectl apply --server-side -f https://github.com/%s/aileron/releases/download/%s/aileron-crds.yaml\n```\n' \
+                      "$IMAGE_REPO" "$TAG" "$OWNER" "$CHART_VERSION" "$OWNER" "$CHART_VERSION" "$OWNER" "$TAG" > release-notes.md
+                  gh release create "$TAG" --title "$TAG" --generate-notes --notes-file release-notes.md \
+                      dist/aileron-crds.yaml
+
+            - name: Trigger stabilizer release
+              env:
+                  GH_TOKEN: ${{ secrets.STABILIZER_TRIGGER }}
+              run: |
+                  gh api repos/${{ github.repository_owner }}/stabilizer/dispatches \
+                      -f event_type=aileron-release \
+                      -F client_payload[version]="${{ steps.ver.outputs.image_tag }}"

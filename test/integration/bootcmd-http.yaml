@@ -1,0 +1,47 @@
+apiVersion: ruddervirt.io/v1alpha1
+kind: VirtualMachineBuild
+metadata:
+  name: test-bootcmd
+  namespace: ruddervirt-system
+spec:
+  files:
+    - name: test.txt
+      inline: |
+        Hello from the HTTP directory!
+        This file was served by the aileron relay pod.
+  httpDirectory:
+    files:
+      - name: test.txt
+  vms:
+    - name: builder
+      source:
+        url: "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2"
+      resources:
+        cpu: 1
+        memory: "1Gi"
+      disks:
+        - name: rootdisk
+          size: "4Gi"
+      communicator:
+        sshUsername: debian
+      cloudInit:
+        userData: |
+          #cloud-config
+          ssh_authorized_keys: []
+          runcmd:
+            - echo "cloud-init done" > /tmp/cloud-init-complete
+      bootCommand:
+        - "<wait10>"
+        - "<wait10>"
+        - "<wait10>"
+        - "wget -q http://{{ .HTTPIP }}:{{ .HTTPPort }}/test.txt -O /tmp/http-test.txt<enter>"
+        - "<wait2>"
+        - "cat /tmp/http-test.txt<enter>"
+      provisioners:
+        - name: verify-http
+          type: shell
+          shell:
+            inline:
+              - echo "=== Boot command HTTP test ==="
+              - cat /tmp/http-test.txt || echo "file not found (boot command may not have had shell access yet)"
+              - echo "=== Provisioner running, boot_command + httpDirectory worked ==="

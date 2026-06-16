@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>aileron-ui</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <h1>aileron-ui</h1>
+  <span class="sub">VM builds, clones &amp; consoles</span>
+  <span id="err" class="err"></span>
+</header>
+
+<main>
+  <section class="panel">
+    <h2>Builds</h2>
+    <div id="builds" class="list">loading&hellip;</div>
+    <details class="new">
+      <summary>New build</summary>
+      <textarea id="build-yaml" spellcheck="false"></textarea>
+      <button id="build-submit">Submit build</button>
+      <div id="build-status" class="form-status"></div>
+    </details>
+  </section>
+
+  <section class="panel">
+    <h2>Clones</h2>
+    <p class="hint">Clone a succeeded build with its <strong>clone</strong> button.</p>
+    <div id="clones" class="list">loading&hellip;</div>
+  </section>
+
+  <section class="panel">
+    <h2>Grades</h2>
+    <div id="grades" class="list">loading&hellip;</div>
+    <details class="new">
+      <summary>New grade</summary>
+      <textarea id="grade-yaml" spellcheck="false"></textarea>
+      <button id="grade-submit">Submit grade</button>
+      <div id="grade-status" class="form-status"></div>
+    </details>
+  </section>
+</main>
+
+<script>
+// Sample manifests pre-filled into the submission textareas.
+window.SAMPLE_BUILD = `apiVersion: ruddervirt.io/v1alpha1
+kind: VirtualMachineBuild
+metadata:
+  name: test-simple
+spec:
+  vms:
+    - name: builder
+      source:
+        url: "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2"
+      resources:
+        cpu: 1
+        memory: "1Gi"
+      disks:
+        - name: rootdisk
+          size: "4Gi"
+      communicator:
+        sshUsername: debian
+      provisioners:
+        - name: hello
+          type: shell
+          shell:
+            inline: |
+              echo "Hello from aileron!"
+              uname -a
+  timeout: 60m
+`;
+
+window.SAMPLE_GRADE = `apiVersion: ruddervirt.io/v1alpha1
+kind: GradeRequest
+metadata:
+  name: grade-sample
+spec:
+  # Namespace containing the target VMs (e.g. a clone namespace).
+  namespace: ns-example
+  vms:
+    - name: clone-simple-builder
+      user: debian
+      password: ""
+      commands:
+        - cat /etc/os-release
+        - uname -a
+`;
+</script>
+<script src="/app.js"></script>
+</body>
+</html>

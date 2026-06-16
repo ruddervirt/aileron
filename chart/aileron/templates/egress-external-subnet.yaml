@@ -1,0 +1,38 @@
+{{- if .Values.egressExternal.enabled }}
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: egress-external
+  namespace: kube-system
+  labels:
+    {{- include "aileron.labels" . | nindent 4 }}
+spec:
+  config: |
+    {
+      "cniVersion": "0.3.1",
+      "type": "bridge",
+      "bridge": "br-egress",
+      "ipam": {
+        "type": "kube-ovn",
+        "server_socket": "/run/openvswitch/kube-ovn-daemon.sock",
+        "provider": "egress-external.kube-system"
+      }
+    }
+---
+apiVersion: kubeovn.io/v1
+kind: Subnet
+metadata:
+  name: egress-external
+  labels:
+    {{- include "aileron.labels" . | nindent 4 }}
+spec:
+  cidrBlock: {{ .Values.egressExternal.cidr }}
+  gateway: {{ .Values.egressExternal.gateway }}
+  excludeIps:
+    - {{ .Values.egressExternal.gateway }}
+  default: false
+  natOutgoing: false
+  private: false
+  protocol: IPv4
+  provider: egress-external.kube-system
+{{- end }}

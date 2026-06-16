@@ -1,0 +1,537 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.1
+  name: virtualmachineclones.ruddervirt.io
+spec:
+  group: ruddervirt.io
+  names:
+    kind: VirtualMachineClone
+    listKind: VirtualMachineCloneList
+    plural: virtualmachineclones
+    shortNames:
+    - vmc
+    singular: virtualmachineclone
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.templateName
+      name: Template
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.cloneID
+      name: Clone-ID
+      type: string
+    - jsonPath: .status.egressGatewayReady
+      name: Egress
+      type: boolean
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          VirtualMachineClone is the Schema for the virtualmachineclones API.
+          It clones VMs from a golden template namespace using CSI volume snapshots.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired state of VirtualMachineClone.
+            properties:
+              ageAnchor:
+                description: |-
+                  ageAnchor is an explicit RFC3339 timestamp used as the age anchor when
+                  the predecessor named in replacesCloneID cannot be found, or when the
+                  caller wants to set the anchor directly. Lookup by replacesCloneID
+                  takes priority when the predecessor exists.
+                format: date-time
+                type: string
+              egressGateway:
+                description: |-
+                  egressGateway controls the VpcEgressGateway for this clone.
+                  Set enabled=false to scale the egress gateway to 0 (cuts internet).
+                  VM power is managed directly via KubeVirt (virtctl stop/start).
+                properties:
+                  enabled:
+                    default: true
+                    description: |-
+                      enabled controls whether the egress gateway pod runs.
+                      When false, the gateway is scaled to 0, cutting internet access.
+                      Defaults to true.
+                    type: boolean
+                type: object
+              namespace:
+                description: |-
+                  namespace overrides the auto-generated child namespace name.
+                  When set, the controller uses this namespace and skips deletion on cleanup.
+                type: string
+              namespacePrefix:
+                default: ns-
+                description: |-
+                  namespacePrefix is the prefix for the auto-generated child namespace.
+                  The generated name is {prefix}{uid-hash} (e.g. "ns-38ca284f").
+                  Defaults to "ns-".
+                type: string
+              network:
+                description: |-
+                  network defines the KubeOVN network topology for the cloned VMs.
+                  If omitted, networking configuration is derived from the template VMs.
+                properties:
+                  subnets:
+                    description: subnets defines the subnets within VPCs.
+                    items:
+                      description: Subnet defines a KubeOVN subnet within a VPC.
+                      properties:
+                        cidr:
+                          description: cidr is the IPv4 CIDR block (e.g. "10.0.1.0/24").
+                            Required.
+                          pattern: ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$
+                          type: string
+                        dhcp:
+                          default: true
+                          description: |-
+                            dhcp enables KubeOVN DHCP on this subnet. Defaults to true.
+                            Ignored when unmanaged is true (the guest owns DHCP).
+                          type: boolean
+                        dns:
+                          description: |-
+                            dns overrides DNS server addresses for DHCP (e.g. "10.0.1.1" or "10.0.1.1,10.0.1.2").
+                            When spec.internet is true the default is public DNS; otherwise there is no default.
+                          type: string
+                        name:
+                          description: name is the subnet identifier, referenced by
+                            VM NIC assignments.
+                          pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
+                          type: string
+                        unmanaged:
+                          description: |-
+                            unmanaged turns this subnet into a bare L2 segment owned by a guest
+                            gateway VM (e.g. pfSense or a Windows DC serving DHCP). The operator
+                            still realizes the subnet as an OVN logical switch - that's what
+                            gives us cross-node L2, VPC isolation, and OVS forwarding that
+                            bypasses iptables - but: OVN's DHCP is turned off, NICs attach via
+                            the l2bridge (managedTap) binding so virt-launcher serves no DHCP
+                            either, the gateway health check is skipped, and KubeOVN's mandatory
+                            gateway router port is relocated to the SECOND-TO-LAST usable IP of
+                            the CIDR (e.g. .253 in a /24) so it cannot shadow the guest gateway
+                            at the first usable IP. OVN IPAM stays on (KubeOVN requires every
+                            port to have an IP) but the allocations are inert; the first usable
+                            IP is excluded so the guest gateway's address is never handed out.
+
+                            Constraints: the CIDR must be /29 or wider; the guest's DHCP pool
+                            must not include the relocated OVN gateway (second-to-last usable
+                            IP); declare the CIDR equal to the range the guest gateway actually
+                            serves so the ovn40subnets ipset entry matches real traffic; dns has
+                            no effect on unmanaged subnets (the guest provides it).
+                          type: boolean
+                        vpc:
+                          description: |-
+                            vpc is the name of the VPC this subnet belongs to.
+                            If omitted, the subnet is placed in the auto-created VPC.
+                          type: string
+                      required:
+                      - cidr
+                      - name
+                      type: object
+                    type: array
+                  vpcs:
+                    description: vpcs defines the virtual private clouds for the operation.
+                    items:
+                      description: |-
+                        VPC defines a KubeOVN VPC. Most operations don't need to declare VPCs
+                        explicitly — one is auto-created per operation. Use this only when you need
+                        multiple isolated VPCs within a single operation.
+                      properties:
+                        internet:
+                          default: false
+                          description: |-
+                            internet enables NAT egress and public DNS (8.8.8.8, 1.1.1.1) for this VPC.
+                            Overridden to false when spec.internet is false.
+                          type: boolean
+                        name:
+                          description: name is the VPC identifier, referenced by subnets.
+                          pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    type: array
+                type: object
+              replacesCloneID:
+                description: |-
+                  replacesCloneID names a prior VirtualMachineClone (by its status.cloneID)
+                  whose age this clone should inherit. The controller looks up the
+                  predecessor and uses its status.ageAnchor (if set) or its
+                  metadata.creationTimestamp as the age anchor for this clone's VMs.
+                  When set, the watchdog deletes this clone's VMs at the same time the
+                  predecessor's would have been deleted.
+                type: string
+              templateName:
+                description: |-
+                  templateName is the golden template name. The template namespace is resolved
+                  as vm-{templateName} and must contain pre-configured VMs with their disks.
+                type: string
+              timeout:
+                default: 15m
+                description: timeout is the maximum duration for the entire clone
+                  operation. Defaults to "15m".
+                type: string
+              vmOverrides:
+                description: vmOverrides allows per-VM customization of the cloned
+                  VMs.
+                items:
+                  description: VMOverride allows customization of a cloned VM.
+                  properties:
+                    name:
+                      description: name must match a VM name in the template namespace.
+                      type: string
+                    nics:
+                      description: nics overrides the NIC assignments for this VM.
+                      items:
+                        description: VMNIC defines a NIC assignment for a VM, connecting
+                          it to a subnet.
+                        properties:
+                          ip:
+                            description: ip is an optional static IP address. If omitted
+                              on a DHCP subnet, auto-assigned.
+                            type: string
+                          mac:
+                            description: mac is an optional static MAC address.
+                            type: string
+                          model:
+                            default: e1000
+                            description: |-
+                              model is the libvirt NIC model exposed to the guest. Defaults to
+                              e1000 because every modern guest OS ships an in-box driver for it,
+                              avoiding the need to side-load netkvm during Windows install or to
+                              rely on virtio support in older guests. Switch to virtio for higher
+                              throughput once the guest has the netkvm/virtio_net driver loaded.
+                            enum:
+                            - virtio
+                            - e1000
+                            - e1000e
+                            - rtl8139
+                            - pcnet
+                            - ne2k_pci
+                            type: string
+                          name:
+                            description: |-
+                              name is a label for this NIC. It's used to key the VMI interface
+                              and network entries against each other but does not control the
+                              in-guest interface name or the PCI placement; pin slot for that.
+                            pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
+                            type: string
+                          slot:
+                            description: |-
+                              slot pins the NIC to a specific PCI slot on the VM, so the same
+                              logical NIC keeps the same PCI address across the base build and
+                              every downstream build that reuses the image. Without this, the
+                              guest sees "new" hardware whenever a downstream spec reorders the
+                              NIC list, and persisted per-adapter state (Windows adapter rename,
+                              static IP, DHCPServer binding, AD DNS binding) lands on the wrong
+                              interface. The PCI address is computed from the slot by Aileron.
+                            maximum: 9
+                            minimum: 1
+                            type: integer
+                          subnet:
+                            description: subnet is the name of the subnet to connect
+                              to.
+                            type: string
+                        required:
+                        - name
+                        - subnet
+                        type: object
+                      type: array
+                    resources:
+                      description: resources overrides compute/storage for this VM.
+                      properties:
+                        cpu:
+                          default: 2
+                          description: cpu is the number of CPU cores. Defaults to
+                            2.
+                          format: int32
+                          type: integer
+                        memory:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          default: 4Gi
+                          description: memory is the amount of RAM. Defaults to "4Gi".
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                      type: object
+                  required:
+                  - name
+                  type: object
+                type: array
+            required:
+            - templateName
+            type: object
+          status:
+            description: status defines the observed state of VirtualMachineClone.
+            properties:
+              ageAnchor:
+                description: |-
+                  ageAnchor is the resolved timestamp used to anchor watchdog age checks
+                  for this clone's VMs. Populated by the controller in the Pending phase
+                  from spec.replacesCloneID or spec.ageAnchor; copied onto each cloned
+                  VM as the ruddervirt.io/age-anchor annotation.
+                format: date-time
+                type: string
+              cloneID:
+                description: |-
+                  cloneID is the unique CUID2 identifier for this clone's resources.
+                  All resources are prefixed with this ID (e.g. "vm-abc123").
+                type: string
+              cloneNamespace:
+                description: cloneNamespace is the namespace where cloned resources
+                  are created.
+                type: string
+              completionTime:
+                description: completionTime is when the clone finished.
+                format: date-time
+                type: string
+              conditions:
+                description: conditions represent the latest available observations.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              egressGatewayReady:
+                description: egressGatewayReady indicates whether the egress gateway
+                  is running.
+                type: boolean
+              message:
+                description: message is a human-readable summary of the clone state.
+                type: string
+              network:
+                description: network records the state of network resources.
+                properties:
+                  egressGatewaysCreated:
+                    description: egressGatewaysCreated lists the VpcEgressGateway
+                      names created.
+                    items:
+                      type: string
+                    type: array
+                  ready:
+                    description: ready indicates all network resources are available.
+                    type: boolean
+                  subnetsCreated:
+                    description: subnetsCreated lists the KubeOVN Subnet names created.
+                    items:
+                      type: string
+                    type: array
+                  vpcsCreated:
+                    description: vpcsCreated lists the KubeOVN VPC names created.
+                    items:
+                      type: string
+                    type: array
+                required:
+                - ready
+                type: object
+              phase:
+                description: phase is the overall clone phase.
+                enum:
+                - Pending
+                - Validating
+                - SnapshotSelection
+                - VolumeProvisioning
+                - Networking
+                - VMProvisioning
+                - Ready
+                - Failed
+                type: string
+              startTime:
+                description: startTime is when the clone started.
+                format: date-time
+                type: string
+              templateNamespace:
+                description: templateNamespace is the namespace where the template
+                  was found.
+                type: string
+              vmStatuses:
+                description: vmStatuses contains information about the cloned virtual
+                  machines.
+                items:
+                  description: ClonedVMStatus contains information about a cloned
+                    VM.
+                  properties:
+                    message:
+                      description: message provides human-readable status.
+                      type: string
+                    name:
+                      description: name is the name of the cloned VM.
+                      type: string
+                    ready:
+                      description: ready indicates the VM is running and ready.
+                      type: boolean
+                  required:
+                  - name
+                  type: object
+                type: array
+              volumeStates:
+                description: volumeStates tracks progress for each template volume
+                  being replicated.
+                items:
+                  description: CloneVolumeStatus captures the state of a single volume
+                    during cloning.
+                  properties:
+                    csiDriver:
+                      description: csiDriver records the CSI driver managing the source
+                        volume.
+                      type: string
+                    message:
+                      description: message provides human-readable status for the
+                        volume.
+                      type: string
+                    persistentVolumeClaimName:
+                      description: persistentVolumeClaimName is the PVC created in
+                        the clone namespace.
+                      type: string
+                    phase:
+                      description: phase reflects current progress for this volume.
+                      enum:
+                      - Pending
+                      - SnapshotSelected
+                      - SnapshotReady
+                      - PersistentVolumeReady
+                      - PVCBound
+                      - Complete
+                      type: string
+                    requestedStorage:
+                      description: requestedStorage records the requested storage
+                        capacity.
+                      type: string
+                    snapshotClassName:
+                      description: snapshotClassName records the VolumeSnapshotClass
+                        selected for the snapshot.
+                      type: string
+                    snapshotContentName:
+                      description: snapshotContentName is the VolumeSnapshotContent
+                        backing the selected snapshot.
+                      type: string
+                    snapshotName:
+                      description: snapshotName is the VolumeSnapshot selected for
+                        restore.
+                      type: string
+                    sourceClonePvName:
+                      description: sourceClonePVName stores the PV created from snapshot
+                        restore before transfer.
+                      type: string
+                    sourceClonePvcName:
+                      description: sourceClonePVCName stores the PVC created in the
+                        template namespace before transfer.
+                      type: string
+                    sourcePvName:
+                      description: sourcePVName stores the PersistentVolume bound
+                        to the source PVC.
+                      type: string
+                    sourcePvcName:
+                      description: sourcePVCName records the source PVC backing the
+                        template volume.
+                      type: string
+                    sourceVmName:
+                      description: |-
+                        sourceVMName records the full name of the source VirtualMachine owning
+                        this volume (i.e., the template VM's metadata.name).
+                      type: string
+                    sourceVmShortName:
+                      description: |-
+                        sourceVMShortName records the short VM name (spec.vms[].name) copied
+                        from the template VM's ruddervirt.io/vm label. Used to derive clone-side
+                        resource names without having to parse the template VM's full name.
+                      type: string
+                    storageClassName:
+                      description: storageClassName names the storage class to use.
+                      type: string
+                    volumeName:
+                      description: volumeName corresponds to the VirtualMachine volume
+                        definition name.
+                      type: string
+                  required:
+                  - volumeName
+                  type: object
+                type: array
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

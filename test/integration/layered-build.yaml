@@ -1,0 +1,67 @@
+---
+# Layered build: sources from the output of test-file-prov (which uploaded
+# hello.txt and config.conf via file provisioners) and verifies those files
+# survived the snapshot, then layers additional changes on top.
+apiVersion: ruddervirt.io/v1alpha1
+kind: VirtualMachineBuild
+metadata:
+  name: test-layered
+  namespace: ruddervirt-system
+spec:
+  files:
+    - name: layer2
+      inline: |
+        This file was added by the second layer.
+  vms:
+    - name: builder
+      source:
+        buildRef:
+          name: test-file-prov
+          vmName: builder
+      resources:
+        cpu: 1
+        memory: "1Gi"
+      disks:
+        - name: rootdisk
+          size: "4Gi"
+      communicator:
+        sshUsername: debian
+      cloudInit:
+        userData: |
+          #cloud-config
+          ssh_authorized_keys: []
+      provisioners:
+        # Verify files from the base image (test-file-prov) survived the snapshot.
+        - name: verify-base-files
+          type: shell
+          shell:
+            inline:
+              - echo "=== Checking files from base image ==="
+              - test -f /home/debian/aileron-test/hello.txt && echo "hello.txt exists"
+              - cat /home/debian/aileron-test/hello.txt
+              - grep "file provisioner" /home/debian/aileron-test/hello.txt
+              - test -f /home/debian/aileron-test/config.conf && echo "config.conf exists"
+              - cat /home/debian/aileron-test/config.conf
+              - grep "aileron-test" /home/debian/aileron-test/config.conf
+              - echo "=== Base image files verified ==="
+
+        # Layer new content on top.
+        - name: upload-layer2
+          type: file
+          file:
+            fileRef: layer2
+            destination: /home/debian/aileron-test/layer2.txt
+
+        # Verify both layers coexist.
+        - name: verify-all-layers
+          type: shell
+          shell:
+            inline:
+              - echo "=== Verifying all layers ==="
+              - cat /home/debian/aileron-test/hello.txt
+              - cat /home/debian/aileron-test/config.conf
+              - cat /home/debian/aileron-test/layer2.txt
+              - grep "second layer" /home/debian/aileron-test/layer2.txt
+              - echo "=== All layers verified ==="
+
+  timeout: 60m

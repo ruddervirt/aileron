@@ -1,0 +1,19 @@
+apiVersion: audit.k8s.io/v1
+kind: Policy
+rules:
+  # Log namespace deletions at RequestResponse level — captures WHO and WHAT
+  - level: RequestResponse
+    verbs: ["delete"]
+    resources:
+      - group: ""
+        resources: ["namespaces"]
+
+  # Log aileron CRD deletions
+  - level: RequestResponse
+    verbs: ["delete", "patch", "update"]
+    resources:
+      - group: "ruddervirt.io"
+        resources: ["virtualmachinebuilds", "virtualmachinenamespaces"]
+
+  # Skip everything else
+  - level: None

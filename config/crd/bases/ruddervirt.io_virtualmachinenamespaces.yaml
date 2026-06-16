@@ -1,0 +1,125 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.1
+  name: virtualmachinenamespaces.ruddervirt.io
+spec:
+  group: ruddervirt.io
+  names:
+    kind: VirtualMachineNamespace
+    listKind: VirtualMachineNamespaceList
+    plural: virtualmachinenamespaces
+    singular: virtualmachinenamespace
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .spec.ownerRef.name
+      name: Owner
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          VirtualMachineNamespace is a logical grouping of isolated VMs, networks, and storage
+          resources within a single Kubernetes namespace. It provides the isolation boundaries
+          that were previously achieved through per-build Kubernetes namespaces, without the
+          cross-namespace complexity.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              VirtualMachineNamespaceSpec defines the desired state of a VirtualMachineNamespace.
+              A VirtualMachineNamespace is a logical grouping of isolated resources (VMs, networks,
+              storage) within a single Kubernetes namespace. It replaces per-build Kubernetes
+              namespaces, providing isolation without cross-namespace complexity.
+            properties:
+              ownerRef:
+                description: ownerRef identifies the CR that owns this namespace (e.g.,
+                  a VirtualMachineBuild or VirtualMachineClone).
+                properties:
+                  kind:
+                    description: kind is the CRD kind (e.g., "VirtualMachineBuild",
+                      "VirtualMachineClone").
+                    type: string
+                  name:
+                    description: name is the CR name.
+                    type: string
+                  namespace:
+                    description: namespace is the CR namespace.
+                    type: string
+                required:
+                - kind
+                - name
+                - namespace
+                type: object
+            type: object
+          status:
+            description: VirtualMachineNamespaceStatus defines the observed state
+              of a VirtualMachineNamespace.
+            properties:
+              network:
+                description: network contains the network topology state.
+                properties:
+                  subnets:
+                    description: subnets lists the KubeOVN Subnet names.
+                    items:
+                      type: string
+                    type: array
+                  vpcs:
+                    description: vpcs lists the KubeOVN VPC names.
+                    items:
+                      type: string
+                    type: array
+                type: object
+              phase:
+                description: phase indicates the lifecycle phase.
+                enum:
+                - Active
+                - Deleting
+                type: string
+              vms:
+                description: vms lists the VirtualMachines in this namespace.
+                items:
+                  description: VirtualMachineNamespaceVM describes a VM within the
+                    namespace.
+                  properties:
+                    name:
+                      description: name is the VM name.
+                      type: string
+                    pvcName:
+                      description: pvcName is the PVC backing this VM's disk.
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

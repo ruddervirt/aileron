@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>vncgateway debug viewer</title>
+<style>
+  body { margin: 0; background: #1e1e1e; color: #ddd; font-family: monospace; }
+  #bar { padding: 6px 10px; background: #2d2d2d; display: flex; gap: 12px; align-items: center; }
+  #state { color: #8c8; }
+  /* Black canvas backing: guacd legitimately skips never-changing black
+     regions, which would otherwise render transparent (page background). */
+  #display { display: inline-block; outline: none; background: #000; }
+  button { font-family: monospace; }
+</style>
+</head>
+<body>
+<div id="bar">
+  <span>vncgateway</span>
+  <span id="state">connecting…</span>
+  <button id="shot">screenshot</button>
+</div>
+<div id="display" tabindex="0"></div>
+<script src="https://cdn.jsdelivr.net/npm/guacamole-common-js@1.5.0/dist/guacamole-common.min.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  // The debug page lives at .../debug/{a}/{b}; the WebSocket endpoint is the
+  // same path without the /debug segment, on the same listener.
+  var wsPath = location.pathname.replace('/debug/', '/');
+  var wsProto = location.protocol === 'https:' ? 'wss://' : 'ws://';
+  var tunnel = new Guacamole.WebSocketTunnel(wsProto + location.host + wsPath);
+  var client = new Guacamole.Client(tunnel);
+
+  var stateNames = ['idle', 'connecting', 'waiting', 'connected', 'disconnecting', 'disconnected'];
+  client.onstatechange = function (s) {
+    document.getElementById('state').textContent = stateNames[s] || s;
+  };
+  client.onerror = function (err) {
+    document.getElementById('state').textContent = 'error: ' + (err.message || JSON.stringify(err));
+  };
+
+  var displayEl = document.getElementById('display');
+  displayEl.appendChild(client.getDisplay().getElement());
+
+  // Forward the JWT (external listener) and any display params.
+  client.connect(location.search.replace(/^\?/, ''));
+  window.onunload = function () { client.disconnect(); };
+
+  var keyboard = new Guacamole.Keyboard(document);
+  keyboard.onkeydown = function (keysym) { client.sendKeyEvent(1, keysym); };
+  keyboard.onkeyup = function (keysym) { client.sendKeyEvent(0, keysym); };
+
+  var mouse = new Guacamole.Mouse(displayEl);
+  mouse.onmousedown = mouse.onmouseup = mouse.onmousemove = function (state) {
+    client.sendMouseState(state);
+  };
+
+  document.getElementById('shot').addEventListener('click', function () {
+    var canvas = client.getDisplay().flatten();
+    var a = document.createElement('a');
+    a.href = canvas.toDataURL('image/png');
+    a.download = 'vncgateway-' + Date.now() + '.png';
+    a.click();
+  });
+})();
+</script>
+</body>
+</html>

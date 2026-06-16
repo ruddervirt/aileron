@@ -1,0 +1,219 @@
+image:
+  repository: ghcr.io/ruddervirt/aileron
+  # Empty inherits .Chart.AppVersion (set at release time), so a versioned chart
+  # pins every aileron image to its release. Local dev overrides via
+  # `--set image.tag=<sha>` (see `make deploy`). Per-component tags below ("")
+  # likewise inherit this resolved tag.
+  tag: ""
+  pullPolicy: Always
+
+# Debug mode. When true, finished Jobs (floppy image, EFI copy, etc.)
+# are not cleaned up via TTLSecondsAfterFinished so their pods can be
+# inspected after completion. Also retains failed VirtualMachineBuild
+# resources (VMs, DataVolumes, Jobs) instead of cleaning them up on
+# phase=Failed, so coordinator pod logs can be captured.
+debug: false
+
+# How long to retain failed VirtualMachineBuild resources (VM namespace,
+# coordinator Job, pods, logs) after the build enters phase=Failed before
+# the controller cleans them up. Useful for post-mortem inspection of
+# provisioner logs. Set to 0 to clean up immediately. Ignored when
+# debug=true (debug mode retains forever).
+# Accepts any Go duration string (e.g. "30m", "1h", "90s").
+failureRetention: "30m"
+
+imagePullSecrets:
+  - name: ghcr-pull-secret
+
+replicaCount: 1
+
+resources:
+  limits:
+    # The manager runs controller-runtime informer caches over every build,
+    # clone, and VM in the namespace; memory scales with object count, not
+    # console count. Bumped for busy zones (rudderusa exam ~1380 objects).
+    cpu: "1"
+    memory: 768Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+# GOMEMLIMIT (soft) keeps Go's GC reclaiming ahead of the cgroup OOM killer;
+# GOMAXPROCS pins the scheduler to the CPU limit so the runtime doesn't see
+# all host cores (96 on metal) and thrash under a throttled quota. Set on
+# every long-lived Go service. Empty GOMEMLIMIT disables it.
+goMemLimit: "600MiB"
+goMaxProcs: 1
+
+leaderElection:
+  enabled: true
+
+# Resource requests applied to every build/clone VM's virt-launcher pod.
+# Controls how many VMs can run concurrently on a node via scheduler pressure.
+vmResources:
+  cpu: "2"
+  memory: "4096Mi"
+
+# Resource limits enforced on VirtualMachineBuild resources at admission time.
+# CPU, memory, and disk size are silently clamped to the max. Disk count and
+# VM count violations fail the build. Values of 0 / empty = no limit.
+buildLimits:
+  maxCPU: 8           # max CPU cores per VM (0 = unlimited)
+  maxMemory: "16Gi"       # max memory per VM, e.g. "16Gi" (empty = unlimited)
+  maxDiskSize: "50Gi"     # max disk size per disk, e.g. "100Gi" (empty = unlimited)
+  maxDiskCount: 3     # max disks per VM (0 = unlimited); exceeding FAILS the build
+  maxVMCount: 4       # max VMs per build (0 = unlimited); exceeding FAILS the build
+
+# Grading: the GradeRequest reconciler (built into the core manager) runs a
+# per-VM Job that executes commands over the VM's KubeVirt serial console.
+grading:
+  enabled: true
+  # Image for the grader Job. Empty defaults to {image.repository}/grader at
+  # the manager's image.tag.
+  graderImage: ""
+  # Seconds to wait after auto powering on a stopped VM before grading it,
+  # giving the guest OS time to bring up its serial console. Empty = the
+  # reconciler's built-in default (90s).
+  bootWaitSeconds: 240
+
+serviceAccount:
+  create: true
+  name: aileron-controller-manager
+
+# KubeOVN egress-external subnet for VPC internet access.
+# Required for builds with internet: true (default).
+egressExternal:
+  enabled: true
+  cidr: 172.17.0.0/16
+  gateway: 172.17.0.1
+
+# aileron-ui: basic self-hosted web UI for submitting builds/clones, watching
+# status, and opening VM consoles in the browser. Shipped as its own pod and
+# exposed via a NodePort Service.
+#
+# SECURITY: the UI is UNAUTHENTICATED and can create/delete VMs and open any
+# console. Only enable it on a trusted network. Consoles are reached by
+# reverse-proxying the browser WebSocket to the cluster-internal vncgateway
+# (no JWT), so they require vncGateway.enabled (default true) below.
+aileronUI:
+  enabled: true
+  image:
+    repository: ghcr.io/ruddervirt/aileron/aileron-ui
+    tag: ""        # empty inherits image.tag (the aileron SHA_TAG)
+    pullPolicy: Always
+  service:
+    # NodePort to expose on each node. Empty = Kubernetes auto-assigns one in
+    # the 30000-32767 range (see `kubectl get svc ...-aileron-ui`).
+    nodePort: "30806"
+  # GOMEMLIMIT (soft) keeps Go's GC ahead of the cgroup OOM killer; GOMAXPROCS
+  # pins the scheduler to the CPU limit. See the top-level note.
+  goMemLimit: "200MiB"
+  goMaxProcs: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: "1"
+      memory: 256Mi
+
+# vncGateway: OPEN-SOURCE aileron core for VM console viewing (guacd +
+# guacamole-lite + the vncbridge sidecar). Boot commands and clone/debug
+# consoles depend on it, so it is enabled by default and works standalone
+# (no external UI or message bus). It is cluster-internal and UNAUTHENTICATED
+# by design; external authenticated access is provided by a separate
+# authenticated VNC proxy. Full architecture and constraint
+# rationale: vncgateway/vncgateway.md.
+# All viewers of a VM share ONE upstream VNC connection (KubeVirt limit); a
+# frontend should set background:#000 on the display container and retry on
+# close with ~1s backoff.
+vncGateway:
+  enabled: true
+  # Single cluster-internal listener. The coordinator and the external
+  # authenticated VNC proxy both connect here over ws://...svc:<port>/internal/...
+  port: 7778
+  image:
+    repository: ghcr.io/ruddervirt/aileron/vncgateway
+    tag: ""
+    pullPolicy: Always
+  bridgeImage:
+    repository: ghcr.io/ruddervirt/aileron/vncbridge
+    tag: ""
+    pullPolicy: Always
+  guacd:
+    # Mirror to ghcr if Docker Hub rate limits bite (pull secrets are
+    # ghcr-only).
+    # 1.5.5: mature joins (1.6.0's join display-sync degrades after a few
+    # joins and has an unfixed deadlock, GUACAMOLE-2270) and 100% paint
+    # coverage. Guest resolution changes are handled by the BRIDGE (passive
+    # RFB geometry tracker recycles connections), so guacd's own resize
+    # handling is not relied upon.
+    image:
+      repository: guacamole/guacd
+      tag: "1.5.5"
+      pullPolicy: IfNotPresent
+    # guacd forks ONE process per viewed VM (joins share it) and holds a
+    # framebuffer + encode buffers each — roughly 30-50 MiB per active
+    # console. Sized for hundreds of concurrent consoles: 12Gi covers ~300
+    # sessions; 8 CPU absorbs encode bursts when many screens redraw at once
+    # (e.g. a mass exam boot). This pod is the clusterwide console chokepoint
+    # (single replica, in-memory registry) — for sustained many-hundreds you
+    # will eventually need horizontal scale (shared session registry), which
+    # is not yet built. The memory REQUEST is a real baseline (it must exist
+    # on the node); ensure the gateway lands where 2Gi+ is free.
+    resources:
+      requests:
+        cpu: "1"
+        memory: 2Gi
+      limits:
+        cpu: "8"
+        memory: 12Gi
+  # Settings for the guacd VNC leg. encodings drives what libvncclient
+  # negotiates upstream — restricted to what the bridge's passive RFB
+  # geometry tracker can parse (ZRLE is length-prefixed and compresses
+  # well; tight is unparseable and would disable resize detection).
+  guac:
+    colorDepth: 24
+    encodings: "zrle copyrect"
+    qualityLevel: 8
+    compressLevel: 2
+    forceLossless: false
+    # REQUIRED true on guacd 1.6.0 (see guacd image comment). QEMU ignores
+    # client-driven resize, so nothing is lost.
+    disableDisplayResize: true
+    # 0 disables the gateway-side inactivity kick: provisioner sessions are
+    # keyboard-quiet for many minutes during installs.
+    maxInactivityMs: 0
+    # 0 disables guacamole-lite's 10s "guacd silent" kill: static screens
+    # (installer menus, BIOS pauses, reboots) legitimately emit nothing.
+    # Real guacd death still tears down instantly via socket events.
+    guacdInactivityMs: 0
+  # Bridge tunnels (KubeVirt VNC websockets) are reaped after this long
+  # without an active guacd connection.
+  tunnelIdleTimeout: "5m"
+  # Clients connecting before the VM console exists are held (with keepalive
+  # nops) and attached the moment it appears, up to this long. No frontend
+  # retry loop needed for the boot window.
+  consoleWaitMs: 600000
+  # Node app: one event loop relays every session's instructions for the whole
+  # cluster (single replica). JS is single-threaded so it can't exceed ~1 core
+  # of compute, but the higher limit gives headroom for libuv I/O + GC under
+  # hundreds of sessions; the V8 old-space cap keeps it inside the mem limit.
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: "2"
+      memory: 1Gi
+  # vncbridge (Go): pipes bytes + runs the per-connection RFB geometry tracker
+  # for every tunnel. Sized for hundreds of tunnels.
+  bridgeResources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+  bridgeGoMemLimit: "400MiB"
+  bridgeGoMaxProcs: 1

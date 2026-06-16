@@ -1,0 +1,16 @@
+apiVersion: ruddervirt.io/v1alpha1
+kind: VirtualMachineClone
+metadata:
+  name: clone-net-override
+  namespace: ruddervirt-system
+spec:
+  templateName: test-multi-vpc
+  network:
+    vpcs:
+      - name: isolated
+        internet: false
+    subnets:
+      - name: internal
+        vpc: isolated
+        cidr: "10.99.0.0/24"
+  timeout: 15m

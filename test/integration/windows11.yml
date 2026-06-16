@@ -1,0 +1,527 @@
+apiVersion: ruddervirt.io/v1alpha1
+kind: VirtualMachineBuild
+metadata:
+  name: base-windows11
+  namespace: ruddervirt-system
+spec:
+  timeout: "8h"
+  # buildOverrides:
+  #   vms:
+  #     - name: builder
+  #       resources:
+  #         cpu: 8
+  #         memory: "16384Mi"
+
+  files:
+    # --- Floppy files ---
+    - name: Autounattend.xml
+      inline: |
+        <?xml version="1.0" encoding="utf-8"?>
+        <unattend xmlns="urn:schemas-microsoft-com:unattend">
+            <settings pass="specialize">
+                <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64"
+                    publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS"
+                    xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State"
+                    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+                    <ComputerName>skillsusa</ComputerName>
+                    <RegisteredOrganization>Microsoft</RegisteredOrganization>
+                    <TimeZone>Eastern Standard Time</TimeZone>
+                </component>
+                <component name="Microsoft-Windows-Security-SPP-UX" processorArchitecture="amd64"
+                    publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS"
+                    xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State"
+                    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+                    <SkipAutoActivation>true</SkipAutoActivation>
+                </component>
+            </settings>
+            <settings pass="windowsPE">
+                <component name="Microsoft-Windows-PnpCustomizationsWinPE" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" processorArchitecture="amd64" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+                    <DriverPaths>
+                        <PathAndCredentials wcm:action="add" wcm:keyValue="1"><Path>%configsetroot%\</Path></PathAndCredentials>
+                    </DriverPaths>
+                </component>
+                <component name="Microsoft-Windows-Setup" processorArchitecture="amd64"
+                    publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS"
+                    xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State"
+                    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+                    <DiskConfiguration>
+                        <Disk wcm:action="add">
+                            <CreatePartitions>
+                                <CreatePartition wcm:action="add">
+                                    <Order>2</Order>
+                                    <Size>100</Size>
+                                    <Type>EFI</Type>
+                                </CreatePartition>
+                                <CreatePartition wcm:action="add">
+                                    <Order>1</Order>
+                                    <Size>500</Size>
+                                    <Type>Primary</Type>
+                                </CreatePartition>
+                                <CreatePartition wcm:action="add">
+                                    <Order>3</Order>
+                                    <Size>16</Size>
+                                    <Type>MSR</Type>
+                                </CreatePartition>
+                                <CreatePartition wcm:action="add">
+                                    <Order>4</Order>
+                                    <Extend>true</Extend>
+                                    <Type>Primary</Type>
+                                </CreatePartition>
+                            </CreatePartitions>
+                            <ModifyPartitions>
+                                <ModifyPartition wcm:action="add">
+                                    <Order>1</Order>
+                                    <Label>WinRE</Label>
+                                    <Format>NTFS</Format>
+                                    <TypeID>DE94BBA4-06D1-4D40-A16A-BFD50179D6AC</TypeID>
+                                    <PartitionID>1</PartitionID>
+                                </ModifyPartition>
+                                <ModifyPartition wcm:action="add">
+                                    <PartitionID>2</PartitionID>
+                                    <Order>2</Order>
+                                    <Format>FAT32</Format>
+                                    <Label>System</Label>
+                                </ModifyPartition>
+                                <ModifyPartition wcm:action="add">
+                                    <Order>3</Order>
+                                    <PartitionID>3</PartitionID>
+                                </ModifyPartition>
+                                <ModifyPartition wcm:action="add">
+                                    <Format>NTFS</Format>
+                                    <Label>Windows</Label>
+                                    <Letter>C</Letter>
+                                    <Order>4</Order>
+                                    <PartitionID>4</PartitionID>
+                                </ModifyPartition>
+                            </ModifyPartitions>
+                            <WillWipeDisk>true</WillWipeDisk>
+                            <DiskID>0</DiskID>
+                        </Disk>
+                        <WillShowUI>OnError</WillShowUI>
+                    </DiskConfiguration>
+                    <DynamicUpdate>
+                        <Enable>true</Enable>
+                    </DynamicUpdate>
+                    <ImageInstall>
+                        <OSImage>
+                            <InstallTo>
+                                <DiskID>0</DiskID>
+                                <PartitionID>4</PartitionID>
+                            </InstallTo>
+                            <WillShowUI>OnError</WillShowUI>
+                            <InstallToAvailablePartition>false</InstallToAvailablePartition>
+                            <InstallFrom>
+                                <MetaData wcm:action="add">
+                                    <Key>/image/index</Key>
+                                    <Value>1</Value>
+                                </MetaData>
+                            </InstallFrom>
+                        </OSImage>
+                    </ImageInstall>
+                    <UserData>
+                        <AcceptEula>true</AcceptEula>
+                        <FullName>SkillsUSA</FullName>
+                        <Organization>SkillsUSA</Organization>
+                        <ProductKey>
+                            <Key></Key>
+                        </ProductKey>
+                    </UserData>
+                </component>
+                <component name="Microsoft-Windows-International-Core-WinPE" processorArchitecture="amd64"
+                    publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS"
+                    xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State"
+                    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+                    <SetupUILanguage>
+                        <UILanguage>en-US</UILanguage>
+                    </SetupUILanguage>
+                    <InputLocale>en-US</InputLocale>
+                    <SystemLocale>en-US</SystemLocale>
+                    <UILanguage>en-US</UILanguage>
+                    <UILanguageFallback>en-US</UILanguageFallback>
+                    <UserLocale>en-US</UserLocale>
+                </component>
+            </settings>
+            <settings pass="oobeSystem">
+                <component name="Microsoft-Windows-International-Core" processorArchitecture="amd64"
+                    publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS"
+                    xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State"
+                    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+                    <InputLocale>en-US</InputLocale>
+                    <SystemLocale>en-US</SystemLocale>
+                    <UILanguage>en-US</UILanguage>
+                    <UILanguageFallback>en-US</UILanguageFallback>
+                    <UserLocale>en-US</UserLocale>
+                </component>
+                <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64"
+                    publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS"
+                    xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State"
+                    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+                    <AutoLogon>
+                        <Password>
+                            <Value>skills</Value>
+                            <PlainText>true</PlainText>
+                        </Password>
+                        <Username>skills</Username>
+                        <Enabled>true</Enabled>
+                    </AutoLogon>
+                    <FirstLogonCommands>
+                        <SynchronousCommand wcm:action="add">
+                            <CommandLine>powershell -NoLogo -ExecutionPolicy Bypass -Command "foreach ($d in 'A','B','C','D','E','F') { $p = \"${d}:\configure-openssh.ps1\"; if (Test-Path $p) { &amp; $p; break } }"</CommandLine>
+                            <Description>Install and configure OpenSSH for packer communicator</Description>
+                            <Order>1</Order>
+                            <RequiresUserInput>false</RequiresUserInput>
+                        </SynchronousCommand>
+                    </FirstLogonCommands>
+                    <OOBE>
+                        <ProtectYourPC>1</ProtectYourPC>
+                        <NetworkLocation>Home</NetworkLocation>
+                    </OOBE>
+                    <UserAccounts>
+                        <LocalAccounts>
+                            <LocalAccount wcm:action="add">
+                                <Password>
+                                    <Value>skills</Value>
+                                    <PlainText>true</PlainText>
+                                </Password>
+                                <Description>skills User</Description>
+                                <DisplayName>skills</DisplayName>
+                                <Group>Administrators</Group>
+                                <Name>skills</Name>
+                            </LocalAccount>
+                        </LocalAccounts>
+                    </UserAccounts>
+                </component>
+            </settings>
+            <settings pass="offlineServicing">
+                <component name="Microsoft-Windows-LUA-Settings" processorArchitecture="amd64"
+                    publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS"
+                    xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State"
+                    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+                    <EnableLUA>false</EnableLUA>
+                </component>
+            </settings>
+        </unattend>
+
+    - name: configure-openssh.ps1
+      inline: |
+        iex ((New-Object System.Net.WebClient).DownloadString('https://chocolatey.org/install.ps1'))
+        choco install openssh --pre --version=9.2.2-beta1 -y
+        . "C:\Program Files\OpenSSH-Win64\install-sshd.ps1"
+        New-NetFirewallRule -Protocol TCP -LocalPort 22 -Direction Inbound -Action Allow -DisplayName SSH
+        Set-Service SSHD -StartupType Automatic
+        Start-Service SSHD
+
+    # Virtio network driver (netkvm) - host these and fill in URLs
+    - name: netkvm.inf
+      url: https://github.com/skillsusaits/aileron-artifacts/raw/refs/heads/main/windows11/netkvm.inf
+    - name: netkvm.sys
+      url: https://github.com/skillsusaits/aileron-artifacts/raw/refs/heads/main/windows11/netkvm.sys
+    - name: netkvm.cat
+      url: https://github.com/skillsusaits/aileron-artifacts/raw/refs/heads/main/windows11/netkvm.cat
+
+    # Virtio SCSI driver (vioscsi) - host these and fill in URLs
+    - name: vioscsi.inf
+      url: https://github.com/skillsusaits/aileron-artifacts/raw/refs/heads/main/windows11/vioscsi.inf
+    - name: vioscsi.sys
+      url: https://github.com/skillsusaits/aileron-artifacts/raw/refs/heads/main/windows11/vioscsi.sys
+    - name: vioscsi.cat
+      url: https://github.com/skillsusaits/aileron-artifacts/raw/refs/heads/main/windows11/vioscsi.cat
+
+    # --- Provisioner files ---
+    - name: ruddervirt_ca.crt
+      inline: |
+        -----BEGIN CERTIFICATE-----
+        MIIDIjCCAgqgAwIBAgIUG9KaOM//9JgLP9oMWXZiuRXb9tUwDQYJKoZIhvcNAQEL
+        BQAwGDEWMBQGA1UEAwwNUnVkZGVydmlydCBDQTAeFw0yNTEwMjExNzQ2NDFaFw0z
+        NTEwMTkxNzQ2NDFaMBgxFjAUBgNVBAMMDVJ1ZGRlcnZpcnQgQ0EwggEiMA0GCSqG
+        SIb3DQEBAQUAA4IBDwAwggEKAoIBAQDFILMt+88m2UmidrLqucXvteJL+nc7APBf
+        37Hj3ivNrp/GZ4zm6IckXFnrzhVb57LbAXOvoGIWMDellWPkvKB6ZEPc6SxT9tGI
+        s0SpNHo4ZyiRsQZU9a/ng8DLvpb8vpIPTLxq6L1Fguio5rhVBesXjbMUlQ4wbUTa
+        yq4TiVgdXkKYAmwmzu4oP75l90O5uSQ1dt6hRlct8oXHb2ORjsZJa5Ow99W+ZTw7
+        2z1JUxWSvHuHRZxpKUiDOM3/jQAkNopd+FAxInKj1Ylls1bnU7PI612zBTaewGzC
+        rw0ZZdMvB0Y0Hd4NZj2GutyuTPLO1xT2wZn2tgR41XIadSY/n5g3AgMBAAGjZDBi
+        MB0GA1UdDgQWBBQ13KecL+TO6Ri4GYE1s33p/UJmuzAfBgNVHSMEGDAWgBQ13Kec
+        L+TO6Ri4GYE1s33p/UJmuzAPBgNVHRMBAf8EBTADAQH/MA8GA1UdEwEB/wQFMAMB
+        Af8wDQYJKoZIhvcNAQELBQADggEBAGPWSGAGy3/dx2Fv/clctacwonmO3fXaboku
+        zoQKm/yuYf9eRLVj0C689Gx/ddOl6W/a0xWVAePJ1nxwi2HLZD46ds5ZpKMKUvbs
+        mg10hjpoilLTNptW9PjpZRgg2ofroMDV1fyVarGbgmyqA0Fdly4WryJ5Zc+KKj4d
+        htovrDN9nRO5u4hiXVB++Kr6tZZq+NC45bbtxQ8oSPzGVMEaFfitEwhRxES46ATy
+        lYDMEA2UP9zBSmqUU7yhQrRAtiCViouQuod8qXCt5w0skY8gfq05qgT1eARm7y1K
+        nL0BCZCk+iAgI8mM6Nja87aBZXeVqdzsl7bB8t0pCUa3CGiu/JE=
+        -----END CERTIFICATE-----
+
+    - name: ruddervirt.crt
+      inline: |
+        -----BEGIN CERTIFICATE-----
+        MIIC3zCCAcegAwIBAgIUBwJdwkciGIq1syCXhuu6zRKFEhwwDQYJKoZIhvcNAQEL
+        BQAwGDEWMBQGA1UEAwwNUnVkZGVydmlydCBDQTAeFw0yNTEwMjExNzQ2NDFaFw0z
+        NTEwMTkxNzQ2NDFaMBUxEzARBgNVBAMMClJ1ZGRlcnZpcnQwggEiMA0GCSqGSIb3
+        DQEBAQUAA4IBDwAwggEKAoIBAQDFFC7+uRUsIgC1RrK+4IX1FcvCbalgvN+cmb/y
+        04ZlTJlv2DRsabqR9EIBRkuBDpB5EN1xZwVWHNWHyuQVHt+K7DkL0EnRhUBbEQLU
+        j/XH2TTMq2b2uJNlO2LnNQeU6jv/2raBkHxdUu/IlTYnegx0kv9XPIUbQRdeFn7j
+        oB63dUiHJw0/VUPpqktx+Qqo3+4z7CJS/QBN/j1iwdSoQxLYRJCQr68NvXQvEOsJ
+        FncBI91h84JDETBlA3ae7+JCnHv1uQMu0Z9FgSdCojdl8dcrQ6lrWCMcU1R/giqW
+        1zQqYBXPZaVKxRIAZ9MQJtf3ohkPRi3XNKhFEAnUkYEwxM2RAgMBAAGjJDAiMAsG
+        A1UdDwQEAwIHgDATBgNVHSUEDDAKBggrBgEFBQcDAzANBgkqhkiG9w0BAQsFAAOC
+        AQEAF9SMiOprZpdVF5SSpXDJm++Eq/WR6mONDF9AbZ3LmJVexMqbJ7A6dUEn5PWs
+        OtWtb07vI8CcORC9G3IflpL1NHqxKEcs+LDTVB6cyT64Zc9moZ6lXYGyiK6RobrY
+        6ghCKj0r2gk03V1F1FTKUw/vo8RAErw6OC29vh8XPeOFomxCsgLbJ8NNwM+HdVCo
+        Xq5yDQb+j+PfGqZmB7s58skArWM2w8lIgIOI6yhQWEaU+basLPYpJOWVIw4mJoO5
+        VOzQBjaJdaeSJGkGAWWqqbTk3fosSZsg9h8SEpzl9SHu0pRsRkD99j/YVYQfbcbq
+        O/RQtP3T8Qx51B4sGlWsD2nTMw==
+        -----END CERTIFICATE-----
+
+    - name: ruddergrade.exe
+      url: "https://github.com/ruddervirt/ruddergrade/releases/download/v1.0.0/ruddergrade.exe"
+
+    - name: rudder-multitool.exe
+      url: "https://github.com/ruddervirt/rudder-multitool/releases/download/v0.0.1/rudder-multitool.exe"
+
+  vms:
+    - name: builder
+      source:
+        blank: true
+      resources:
+        cpu: 8
+        memory: "16384Mi"
+      disks:
+        - name: rootdisk
+          size: "25Gi"
+          bus: scsi
+      efiFirmware:
+        secureBoot: false
+      isos:
+        - url: "https://dropbox.skillsusaits.org/i/tiny1123H2x64.iso"
+          checksum: "f260e50bf9afafd8f972a729402a557aadcd3a227918fc566cf42d48aa723a85"
+      floppy:
+        files:
+          - name: Autounattend.xml
+          - name: configure-openssh.ps1
+          - name: netkvm.inf
+          - name: netkvm.sys
+          - name: netkvm.cat
+          - name: vioscsi.inf
+          - name: vioscsi.sys
+          - name: vioscsi.cat
+      communicator:
+        shell: powershell
+        sshUsername: skills
+        sshPassword: skills
+        sshTimeout: "8h"
+      bootCommand:
+        - "<enter>"
+        - "<wait1s>"
+        - "<enter>"
+        - "<wait1s>"
+        - "<enter>"
+        - "<enter>"
+        - "<wait1s>"
+        - "<enter>"
+        - "<wait1s>"
+        - "<enter>"
+        - "<enter>"
+        - "<wait1s>"
+        - "<enter>"
+        - "<wait1s>"
+        - "<enter>"
+        - "<enter>"
+        - "<wait1s>"
+        - "<enter>"
+        - "<wait1s>"
+        - "<enter>"
+      provisioners:
+        - name: install-updates
+          type: windows-update
+          windowsUpdate:
+            searchCriteria: "BrowseOnly=0 and IsInstalled=0"
+            filters:
+              - "exclude:$_.Title -like '*Preview*'"
+              - "include:$true"
+
+        - name: install-guest-tools
+          type: shell
+          shell:
+            inline:
+              # - "choco install virtio-drivers -y --version=0.1.215.200"
+              - "choco install sdelete -y --ignore-checksums"
+              - "choco install autohotkey.portable -y"
+              # - "Remove-Item -Recurse -Force -Path C:\\ProgramData\\chocolatey\\lib\\virtio-drivers\\tools\\virtio"
+
+        # Phase 1.5: Reboot after driver install
+        - name: reboot-after-drivers
+          type: reboot
+
+        # Phase 2: Upload certificates for code signing trust
+        - name: upload-ca-cert
+          type: file
+          file:
+            fileRef: ruddervirt_ca.crt
+            destination: "C:\\Users\\skills\\ruddervirt_ca.crt"
+        - name: upload-signing-cert
+          type: file
+          file:
+            fileRef: ruddervirt.crt
+            destination: "C:\\Users\\skills\\ruddervirt.crt"
+
+        - name: powershell-ssh
+          type: shell
+          shell:
+            inline:
+              - 'New-ItemProperty -Path "HKLM:\SOFTWARE\OpenSSH" -Name DefaultShell -Value "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" -PropertyType String -Force'
+
+        - name: skills-things
+          type: shell
+          shell:
+            inline:
+              # DNS, hostname, password, execution policy
+              - |
+                if (-not (Test-Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient")) {
+                  New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient" -Force | Out-Null
+                }
+                Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient" -Name "AppendToMultiLabelName" -Value 1 -Type DWord -Force
+                Rename-Computer "SKILLS"
+                wmic useraccount where "name='skills'" set PasswordExpires=FALSE
+                Set-ExecutionPolicy -ExecutionPolicy Unrestricted -Force
+              # Disable UI clutter
+              - |
+                Set-ItemProperty -Path HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Search -Name SearchBoxTaskbarMode -Value 0 -Type DWord -Force
+                Get-AppxPackage -alluser *WindowsStore* | Remove-Appxpackage
+                Set-ItemProperty -Path HKLM:\Software\Microsoft\Windows\CurrentVersion\policies\system -Name EnableLUA -Value 1
+              # Performance and power
+              - |
+                Set-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects' -Name 'VisualFXSetting' -Value 2
+                powercfg -h off
+                Set-ItemProperty HKLM:\SYSTEM\CurrentControlSet\Control\Power\ -name HiberFileSizePercent -value 0
+                Set-ItemProperty HKLM:\SYSTEM\CurrentControlSet\Control\Power\ -name HibernateEnabled -value 0
+                powercfg -change -monitor-timeout-ac 0
+              # Disable indexing and services
+              - |
+                Set-Service -StartupType Disabled "WSearch"
+                Set-Service -StartupType Disabled "DoSvc"
+                Set-WindowsReservedStorageState -State Disabled
+              # Edge and notifications
+              - |
+                New-Item "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Force
+                Set-ItemProperty -Path HKLM:\SOFTWARE\Policies\Microsoft\Edge -Name HideFirstRunExperience -Value 1
+                New-Item -Path "HKCU:\Software\Policies\Microsoft\Windows" -Name "Explorer" -Force
+                New-ItemProperty -Path "HKCU:\Software\Policies\Microsoft\Windows\Explorer" -Name "DisableNotificationCenter" -PropertyType "DWord" -Value 1
+              # Network and boot
+              - |
+                New-Item -Path "HKLM:\System\CurrentControlSet\Control\Network\NewNetworkWindowOff" -Force
+                netsh advfirewall firewall set rule group="Network Discovery" new enable=No
+                bcdedit /set "{default}" bootmenupolicy legacy
+
+        - name: exe-signer
+          type: shell
+          shell:
+            inline:
+              - |
+                Import-Certificate -FilePath "C:\Users\skills\ruddervirt_ca.crt" -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
+                Import-Certificate -FilePath "C:\Users\skills\ruddervirt.crt" -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
+                Remove-Item -Path "C:\Users\skills\ruddervirt_ca.crt" -Force
+                Remove-Item -Path "C:\Users\skills\ruddervirt.crt" -Force
+
+        # Phase 3.5: Reboot after configuration
+        - name: reboot-after-config
+          type: reboot
+
+        # Phase 4: Deploy executables
+        - name: upload-ruddergrade
+          type: file
+          file:
+            fileRef: ruddergrade.exe
+            destination: "C:\\Windows\\system32\\ruddergrade.exe"
+
+        - name: upload-rudder-multitool
+          type: file
+          file:
+            fileRef: rudder-multitool.exe
+            destination: "C:\\Windows\\system32\\rudder-multitool.exe"
+
+        # Phase 5: Serial console + compact
+        - name: serial-console
+          type: shell
+          shell:
+            inline:
+              - |
+                Write-Host "Resolving EMS-SAC capability name..."
+                $cap = Get-WindowsCapability -Online -Name Windows.Desktop.EMS-SAC.Tools* | Select-Object -First 1
+                $capName = if ($cap) { $cap.Name } else { 'Windows.Desktop.EMS-SAC.Tools~~~~0.0.1.0' }
+                Write-Host "Using capability: $capName (current state: $(if ($cap) { $cap.State } else { 'unknown (using backfill)' }))"
+                if (Get-ScheduledTask -TaskName "AddTask" -ErrorAction SilentlyContinue) {
+                  Write-Host "Removing stale scheduled task..."
+                  Unregister-ScheduledTask -TaskName "AddTask" -Confirm:$false
+                }
+                $t = New-ScheduledTaskTrigger -At 23:59 -Once
+                $u = New-ScheduledTaskPrincipal System
+                $a = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -NonInteractive -Command `"Add-WindowsCapability -Online -Name $capName`""
+                $k = Register-ScheduledTask -TaskPath \ -TaskName "AddTask" -Trigger $t -Principal $u -Action $a
+                Start-ScheduledTask -TaskName AddTask
+                Write-Host "Waiting for capability installation..."
+                # InstallPending is a valid terminal state: CBS has staged the
+                # payload but needs a reboot to finalize it. bcdedit /ems writes
+                # BCD entries regardless, and the reboot-final step later in the
+                # provisioner chain will complete CBS's work. Waiting for a
+                # strict 'Installed' here deadlocks because the state can't flip
+                # without the reboot, and the reboot can't happen until this
+                # step exits.
+                while ($true) {
+                  $state = (Get-WindowsCapability -Online -Name $capName).State
+                  if ($state -eq 'Installed' -or $state -eq 'InstallPending') {
+                    Write-Host "Capability reached terminal state: $state"
+                    break
+                  }
+                  $taskInfo = Get-ScheduledTaskInfo -TaskName "AddTask"
+                  $taskState = (Get-ScheduledTask -TaskName "AddTask").State
+                  Write-Host "Capability state: $state | Task state: $taskState | Last result: $($taskInfo.LastTaskResult) | Last run: $($taskInfo.LastRunTime)"
+                  if ($taskState -eq "Ready" -and $taskInfo.LastTaskResult -ne 0) {
+                    Write-Host "WARNING: Task exited with code $($taskInfo.LastTaskResult). Restarting..."
+                    Start-ScheduledTask -TaskName AddTask
+                  }
+                  Write-Host "Still installing, sleeping 120s..."
+                  Start-Sleep -Seconds 120
+                }
+                Write-Host "Capability install accepted. Removing scheduled task..."
+                $k | Unregister-ScheduledTask -Confirm:$false
+                Write-Host "Configuring EMS via bcdedit..."
+                bcdedit /ems '{current}' on
+                bcdedit /emssettings EMSPORT:1 EMSBAUDRATE:115200
+                Write-Host "Done."
+       
+        - name: adminstrator.ps1
+          type: shell
+          shell:
+            inline:
+              - |
+                net user Administrator /active:yes
+                net user Administrator "skillsadmin!"
+                $regPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList"
+                if (-not (Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
+                New-ItemProperty -Path $regPath -Name "Administrator" -Value 0 -PropertyType DWORD -Force | Out-Null
+         
+        - name: disable-windows-update
+          type: shell
+          shell:
+            inline:
+              - |
+                # Disable Windows Update services
+                $services = @("BITS", "wuauserv", "UsoSvc", "uhssvc", "WaaSMedicSvc")
+                foreach ($service in $services) {
+                  Stop-Service -Name $service -Force -ErrorAction SilentlyContinue
+                  Set-Service -Name $service -StartupType Disabled -ErrorAction SilentlyContinue
+                }
+                If (!(Test-Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU")) {
+                  New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" -Force | Out-Null
+                }
+                Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" -Name "NoAutoUpdate" -Type DWord -Value 1
+                Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" -Name "AUOptions" -Type DWord -Value 1
+
+        - name: compact
+          type: shell
+          shell:
+            inline:
+              - "Optimize-Volume -DriveLetter C -ReTrim -Verbose"
+
+        # Final reboot
+        - name: reboot-final
+          type: reboot

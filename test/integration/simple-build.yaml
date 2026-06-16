@@ -1,0 +1,33 @@
+apiVersion: ruddervirt.io/v1alpha1
+kind: VirtualMachineBuild
+metadata:
+  name: test-simple
+  namespace: ruddervirt-system
+spec:
+  vms:
+    - name: builder
+      source:
+        url: "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2"
+      resources:
+        cpu: 1
+        memory: "1Gi"
+      disks:
+        - name: rootdisk
+          size: "4Gi"
+      communicator:
+        sshUsername: debian
+      cloudInit:
+        userData: |
+          #cloud-config
+          ssh_authorized_keys: []
+          runcmd:
+            - echo "cloud-init done" > /tmp/cloud-init-complete
+      provisioners:
+        - name: hello
+          type: shell
+          shell:
+            inline:
+              - echo "Hello from aileron!"
+              - uname -a
+              - cat /etc/os-release
+  timeout: 60m

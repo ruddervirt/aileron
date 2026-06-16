@@ -1,0 +1,10 @@
+---
+# Clone test: clones the simple build and verifies the VM boots.
+apiVersion: ruddervirt.io/v1alpha1
+kind: VirtualMachineClone
+metadata:
+  name: clone-simple
+  namespace: ruddervirt-system
+spec:
+  templateName: test-simple
+  timeout: 30m

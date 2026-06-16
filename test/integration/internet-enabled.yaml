@@ -1,0 +1,34 @@
+---
+# Test: default VPC has internet=true — VM should have internet access.
+apiVersion: ruddervirt.io/v1alpha1
+kind: VirtualMachineBuild
+metadata:
+  name: test-internet-on
+  namespace: ruddervirt-system
+spec:
+  vms:
+    - name: builder
+      source:
+        url: "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2"
+      resources:
+        cpu: 1
+        memory: "1Gi"
+      disks:
+        - name: rootdisk
+          size: "4Gi"
+      communicator:
+        sshUsername: debian
+      cloudInit:
+        userData: |
+          #cloud-config
+          ssh_authorized_keys: []
+      provisioners:
+        - name: check-internet
+          type: shell
+          shell:
+            inline:
+              - echo "=== Testing internet connectivity ==="
+              - curl -sf --max-time 10 -o /dev/null http://deb.debian.org/debian/dists/bookworm/Release && echo "Internet OK"
+              - echo "=== Internet test passed ==="
+
+  timeout: 60m

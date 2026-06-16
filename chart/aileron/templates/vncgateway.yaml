@@ -1,0 +1,180 @@
+{{- if .Values.vncGateway.enabled -}}
+# vncgateway: open-source aileron core for VM console viewing. Boot commands
+# and clone/debug consoles depend on it, so it is gated only on
+# vncGateway.enabled (default true) and works in a standalone aileron install
+# with no external UI or message bus. Architecture and the reasoning
+# behind the constraints: vncgateway/vncgateway.md.
+#
+# One pod, three containers:
+#   - vncgateway (Node): per-VM session sharing (KubeVirt allows ONE VNC
+#     connection per VMI, so all viewers join one guacd connection),
+#     hold-until-console, transparent re-attach for human viewers. NO auth:
+#     this listener is ClusterIP-only; external access goes through a separate
+#     authenticated VNC proxy.
+#   - guacd: Guacamole proxy daemon, re-encodes VNC as compressed PNG/JPEG
+#     (version pinned in values — 1.6.x has display regressions, see doc).
+#   - vncbridge (Go): localhost TCP listeners piping to the KubeVirt VNC
+#     WebSocket subresource (guacd only dials plain TCP); also detects guest
+#     resolution changes in the stream and recycles connections.
+# guacd (:4822) and the bridge tunnel API (:9190) bind localhost only —
+# guacd has NO authentication and must never be reachable beyond the pod.
+# Single replica by design: session-sharing state is in-memory.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "aileron.fullname" . }}-vncgateway
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "aileron.labels" . | nindent 4 }}
+    app.kubernetes.io/component: vncgateway
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "aileron.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: vncgateway
+  template:
+    metadata:
+      annotations:
+        timestamp: {{ now | quote }}
+      labels:
+        {{- include "aileron.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: vncgateway
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "aileron.serviceAccountName" . }}
+      containers:
+        - name: vncgateway
+          image: "{{ .Values.vncGateway.image.repository }}:{{ .Values.vncGateway.image.tag | default (include "aileron.imageTag" .) }}"
+          imagePullPolicy: {{ .Values.vncGateway.image.pullPolicy }}
+          ports:
+            - name: ws
+              containerPort: {{ .Values.vncGateway.port }}
+              protocol: TCP
+          env:
+            - name: LISTEN_PORT
+              value: {{ .Values.vncGateway.port | quote }}
+            - name: GUACD_HOST
+              value: "127.0.0.1"
+            - name: GUACD_PORT
+              value: "4822"
+            - name: BRIDGE_URL
+              value: "http://127.0.0.1:9190"
+            - name: AILERON_NAMESPACE
+              value: {{ .Release.Namespace | quote }}
+            - name: GUAC_COLOR_DEPTH
+              value: {{ .Values.vncGateway.guac.colorDepth | quote }}
+            - name: GUAC_ENCODINGS
+              value: {{ .Values.vncGateway.guac.encodings | quote }}
+            - name: GUAC_QUALITY_LEVEL
+              value: {{ .Values.vncGateway.guac.qualityLevel | quote }}
+            - name: GUAC_COMPRESS_LEVEL
+              value: {{ .Values.vncGateway.guac.compressLevel | quote }}
+            {{- if .Values.vncGateway.guac.forceLossless }}
+            - name: GUAC_FORCE_LOSSLESS
+              value: "true"
+            {{- end }}
+            {{- if not .Values.vncGateway.guac.disableDisplayResize }}
+            - name: GUAC_DISABLE_DISPLAY_RESIZE
+              value: "false"
+            {{- end }}
+            - name: MAX_INACTIVITY_MS
+              value: {{ .Values.vncGateway.guac.maxInactivityMs | quote }}
+            - name: GUACD_INACTIVITY_MS
+              value: {{ .Values.vncGateway.guac.guacdInactivityMs | quote }}
+            - name: CONSOLE_WAIT_MS
+              value: {{ .Values.vncGateway.consoleWaitMs | quote }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: ws
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: ws
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          securityContext:
+            runAsNonRoot: true
+            # node:alpine's "node" user; numeric so kubelet can verify non-root.
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+          resources:
+            {{- toYaml .Values.vncGateway.resources | nindent 12 }}
+        - name: guacd
+          image: "{{ .Values.vncGateway.guacd.image.repository }}:{{ .Values.vncGateway.guacd.image.tag }}"
+          imagePullPolicy: {{ .Values.vncGateway.guacd.image.pullPolicy }}
+          # Loopback-only: guacd has no auth, so it must never be reachable
+          # beyond the pod. No TCP probe — the kubelet dials the pod IP, which
+          # loopback binding makes unreachable by design. command is explicit
+          # because not every guacd image version ships an ENTRYPOINT.
+          command: ["/opt/guacamole/sbin/guacd"]
+          args: ["-b", "127.0.0.1", "-f"]
+          resources:
+            {{- toYaml .Values.vncGateway.guacd.resources | nindent 12 }}
+        - name: vncbridge
+          image: "{{ .Values.vncGateway.bridgeImage.repository }}:{{ .Values.vncGateway.bridgeImage.tag | default (include "aileron.imageTag" .) }}"
+          imagePullPolicy: {{ .Values.vncGateway.bridgeImage.pullPolicy }}
+          ports:
+            - name: health
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: BRIDGE_LISTEN_ADDR
+              value: "127.0.0.1:9190"
+            - name: HEALTH_ADDR
+              value: ":8080"
+            - name: TUNNEL_IDLE_TIMEOUT
+              value: {{ .Values.vncGateway.tunnelIdleTimeout | quote }}
+            {{- if .Values.vncGateway.bridgeGoMemLimit }}
+            - name: GOMEMLIMIT
+              value: {{ .Values.vncGateway.bridgeGoMemLimit | quote }}
+            {{- end }}
+            {{- if .Values.vncGateway.bridgeGoMaxProcs }}
+            - name: GOMAXPROCS
+              value: {{ .Values.vncGateway.bridgeGoMaxProcs | quote }}
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+          resources:
+            {{- toYaml .Values.vncGateway.bridgeResources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "aileron.fullname" . }}-vncgateway
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "aileron.labels" . | nindent 4 }}
+    app.kubernetes.io/component: vncgateway
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.vncGateway.port }}
+      targetPort: ws
+      protocol: TCP
+      name: ws
+    - port: 8080
+      targetPort: health
+      protocol: TCP
+      name: health
+  selector:
+    {{- include "aileron.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: vncgateway
+{{- end }}

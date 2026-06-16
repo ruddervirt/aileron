@@ -1,0 +1,175 @@
+{{- if .Values.aileronUI.enabled -}}
+# aileron-ui: a basic, self-hosted web interface for submitting
+# VirtualMachineBuild / VirtualMachineClone manifests, watching their status,
+# and opening VM consoles in the browser.
+#
+# SECURITY: this UI is UNAUTHENTICATED and can create/delete VMs and open any
+# console. It is exposed as a NodePort Service — only enable it on a trusted
+# network. Consoles work by reverse-proxying the browser WebSocket to the
+# cluster-internal vncgateway (no JWT), so they require vncGateway.enabled.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "aileron.fullname" . }}-aileron-ui
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "aileron.labels" . | nindent 4 }}
+    app.kubernetes.io/component: aileron-ui
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "aileron.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: aileron-ui
+  template:
+    metadata:
+      annotations:
+        timestamp: {{ now | quote }}
+      labels:
+        {{- include "aileron.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: aileron-ui
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "aileron.fullname" . }}-aileron-ui
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: aileron-ui
+          image: "{{ .Values.aileronUI.image.repository }}:{{ .Values.aileronUI.image.tag | default (include "aileron.imageTag" .) }}"
+          imagePullPolicy: {{ .Values.aileronUI.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: LISTEN_ADDR
+              value: ":8080"
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            # In-cluster vncgateway listener the console proxy relays to.
+            - name: VNCGATEWAY_URL
+              value: "ws://{{ include "aileron.fullname" . }}-vncgateway.{{ .Release.Namespace }}.svc:{{ .Values.vncGateway.port }}"
+            {{- if .Values.aileronUI.goMemLimit }}
+            - name: GOMEMLIMIT
+              value: {{ .Values.aileronUI.goMemLimit | quote }}
+            {{- end }}
+            {{- if .Values.aileronUI.goMaxProcs }}
+            - name: GOMAXPROCS
+              value: {{ .Values.aileronUI.goMaxProcs | quote }}
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            {{- toYaml .Values.aileronUI.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "aileron.fullname" . }}-aileron-ui
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "aileron.labels" . | nindent 4 }}
+    app.kubernetes.io/component: aileron-ui
+spec:
+  type: NodePort
+  ports:
+    - port: 80
+      targetPort: http
+      protocol: TCP
+      name: http
+      {{- if .Values.aileronUI.service.nodePort }}
+      nodePort: {{ .Values.aileronUI.service.nodePort }}
+      {{- end }}
+  selector:
+    {{- include "aileron.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: aileron-ui
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "aileron.fullname" . }}-aileron-ui
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "aileron.labels" . | nindent 4 }}
+    app.kubernetes.io/component: aileron-ui
+---
+# Least-privilege role: the UI only lists/creates/deletes builds & clones and
+# reads namespaces. It does NOT get the manager's broad cluster permissions.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "aileron.fullname" . }}-aileron-ui
+  labels:
+    {{- include "aileron.labels" . | nindent 4 }}
+rules:
+  - apiGroups:
+      - ruddervirt.io
+    resources:
+      - virtualmachinebuilds
+      - virtualmachineclones
+      - graderequests
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - namespaces
+      - pods
+    verbs:
+      - get
+      - list
+      - watch
+  # Read coordinator pod logs to surface provisioner output in the UI.
+  - apiGroups:
+      - ""
+    resources:
+      - pods/log
+    verbs:
+      - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "aileron.fullname" . }}-aileron-ui
+  labels:
+    {{- include "aileron.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "aileron.fullname" . }}-aileron-ui
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "aileron.fullname" . }}-aileron-ui
+    namespace: {{ .Release.Namespace }}
+{{- end }}

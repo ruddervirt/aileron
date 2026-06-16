@@ -1,0 +1,8 @@
+apiVersion: ruddervirt.io/v1alpha1
+kind: VirtualMachineClone
+metadata:
+  name: clone-multi-vpc
+  namespace: ruddervirt-system
+spec:
+  templateName: test-multi-vpc
+  timeout: 15m

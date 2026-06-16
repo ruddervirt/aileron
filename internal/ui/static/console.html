@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>console</title>
+<style>
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: #1e1e1e; color: #ddd;
+    font-family: ui-monospace, monospace;
+    display: flex; flex-direction: column;
+  }
+  #bar { padding: 6px 10px; background: #2d2d2d; display: flex; gap: 12px; align-items: center; flex: 0 0 auto; }
+  #state { color: #8c8; }
+  /* The viewport fills the space below the bar and centers the console; the
+     display is scaled by console.js to fit it while preserving aspect ratio. */
+  #viewport {
+    flex: 1 1 auto; min-height: 0; overflow: hidden;
+    display: flex; align-items: center; justify-content: center;
+    background: #000;
+  }
+  /* Black backing: guacd legitimately skips never-changing black regions,
+     which would otherwise render transparent (page background). */
+  #display { outline: none; background: #000; }
+  button { font-family: inherit; cursor: pointer; }
+  button:disabled { cursor: not-allowed; opacity: 0.5; }
+  #name { font-weight: bold; }
+</style>
+</head>
+<body>
+<div id="bar">
+  <span>console</span>
+  <span id="name"></span>
+  <span id="state">connecting&hellip;</span>
+  <button id="shot" disabled>screenshot</button>
+</div>
+<div id="viewport"><div id="display" tabindex="0"></div></div>
+<!-- guacamole-common.min.js (CommonJS build) ends with an unguarded
+     `module.exports=Guacamole`; this shim makes that a harmless no-op in the
+     browser while the `var Guacamole` global it declares is still exported. -->
+<script>window.module = { exports: {} };</script>
+<script src="/guacamole-common.min.js"></script>
+<script src="/console.js"></script>
+</body>
+</html>

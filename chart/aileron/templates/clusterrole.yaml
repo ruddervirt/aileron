@@ -1,0 +1,304 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "aileron.fullname" . }}-manager
+  labels:
+    {{- include "aileron.labels" . | nindent 4 }}
+rules:
+  # ruddervirt.io resources
+  - apiGroups:
+      - ruddervirt.io
+    resources:
+      - virtualmachinebuilds
+      - virtualmachineclones
+      - virtualmachinenamespaces
+      - graderequests
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - ruddervirt.io
+    resources:
+      - virtualmachinebuilds/status
+      - virtualmachineclones/status
+      - virtualmachinenamespaces/status
+      - graderequests/status
+    verbs:
+      - get
+      - update
+      - patch
+  - apiGroups:
+      - ruddervirt.io
+    resources:
+      - virtualmachinebuilds/finalizers
+      - virtualmachineclones/finalizers
+      - virtualmachinenamespaces/finalizers
+      - graderequests/finalizers
+    verbs:
+      - update
+  # Core: Namespaces
+  - apiGroups:
+      - ""
+    resources:
+      - namespaces
+    verbs:
+      - get
+      - list
+      - watch
+  # Core: PersistentVolumes for cross-namespace volume transfer
+  - apiGroups:
+      - ""
+    resources:
+      - persistentvolumes
+    verbs:
+      - get
+      - list
+      - watch
+      - patch
+      - update
+  # VolumeSnapshots for clone operations
+  - apiGroups:
+      - snapshot.storage.k8s.io
+    resources:
+      - volumesnapshots
+      - volumesnapshotcontents
+      - volumesnapshotclasses
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - watch
+  # KubeOVN VPC Egress Gateways for internet access
+  - apiGroups:
+      - kubeovn.io
+    resources:
+      - vpc-egress-gateways
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - update
+      - patch
+      - watch
+  # CDI DataVolumes
+  - apiGroups:
+      - cdi.kubevirt.io
+    resources:
+      - datavolumes
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  # KubeVirt CR (feature gate management)
+  - apiGroups:
+      - kubevirt.io
+    resources:
+      - kubevirts
+    verbs:
+      - get
+      - list
+      - patch
+      - update
+  # KubeVirt VirtualMachines
+  - apiGroups:
+      - kubevirt.io
+    resources:
+      - virtualmachines
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  # KubeVirt VirtualMachineInstances
+  - apiGroups:
+      - kubevirt.io
+    resources:
+      - virtualmachineinstances
+    verbs:
+      - delete
+      - get
+      - list
+      - watch
+  # KubeOVN VPCs
+  - apiGroups:
+      - kubeovn.io
+    resources:
+      - vpcs
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  # KubeOVN IPs (for orphaned IP cleanup)
+  - apiGroups:
+      - kubeovn.io
+    resources:
+      - ips
+    verbs:
+      - get
+      - list
+      - delete
+  # KubeOVN Subnets
+  - apiGroups:
+      - kubeovn.io
+    resources:
+      - subnets
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  # Core: Secrets
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - delete
+  # Core: ConfigMaps
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  # Core: Pods
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - delete
+  # Core: PVCs
+  - apiGroups:
+      - ""
+    resources:
+      - persistentvolumeclaims
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  # Core: Events
+  - apiGroups:
+      - ""
+    resources:
+      - events
+    verbs:
+      - create
+      - patch
+  # Core: Pods/exec for disk reader
+  - apiGroups:
+      - ""
+    resources:
+      - pods/exec
+    verbs:
+      - create
+  # Batch: Jobs for EFI firmware copy
+  - apiGroups:
+      - batch
+    resources:
+      - jobs
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - delete
+  # NetworkAttachmentDefinitions for multi-NIC
+  - apiGroups:
+      - k8s.cni.cncf.io
+    resources:
+      - network-attachment-definitions
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - delete
+  # NetworkPolicies for internet control
+  - apiGroups:
+      - networking.k8s.io
+    resources:
+      - networkpolicies
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - delete
+  # KubeVirt subresources for port-forward and VNC
+  - apiGroups:
+      - subresources.kubevirt.io
+    resources:
+      - virtualmachineinstances/portforward
+      - virtualmachineinstances/vnc
+    verbs:
+      - get
+  # Grading: power target VMs on/off for grade jobs
+  - apiGroups:
+      - subresources.kubevirt.io
+    resources:
+      - virtualmachines/start
+      - virtualmachines/stop
+    verbs:
+      - update
+  # Grading: read grader Job pod logs to extract command results
+  - apiGroups:
+      - ""
+    resources:
+      - pods/log
+    verbs:
+      - get
+      - list
+  # TokenReview for VNC proxy viewer authentication
+  - apiGroups:
+      - authentication.k8s.io
+    resources:
+      - tokenreviews
+    verbs:
+      - create
+  # SubjectAccessReview for VNC proxy viewer authorization
+  - apiGroups:
+      - authorization.k8s.io
+    resources:
+      - subjectaccessreviews
+    verbs:
+      - create

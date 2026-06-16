@@ -1,0 +1,39 @@
+{{- if .Values.grading.enabled -}}
+# RBAC for the per-VM grading Jobs scheduled by the GradeRequest reconciler.
+# The Jobs run as the `grader` ServiceAccount and need read access to the
+# target VM's KubeVirt serial console (and portforward) subresources.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: grader
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "aileron.labels" . | nindent 4 }}
+    app.kubernetes.io/component: grader
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "aileron.fullname" . }}-grader
+  labels:
+    {{- include "aileron.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["subresources.kubevirt.io"]
+    resources: ["virtualmachineinstances/console", "virtualmachineinstances/portforward"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "aileron.fullname" . }}-grader
+  labels:
+    {{- include "aileron.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "aileron.fullname" . }}-grader
+subjects:
+  - kind: ServiceAccount
+    name: grader
+    namespace: {{ .Release.Namespace }}
+{{- end }}

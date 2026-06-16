@@ -1,0 +1,15 @@
+.git
+bin/
+dist/
+vncgateway/node_modules/
+*.md
+Makefile
+chart/
+config/
+hack/
+test/
+.github/
+.devcontainer/
+.golangci.yml
+.custom-gcl.yml
+ruddervirtvirt/

@@ -1,0 +1,47 @@
+apiVersion: ruddervirt.io/v1alpha1
+kind: VirtualMachineBuild
+metadata:
+  name: handbuild
+  namespace: ruddervirt-system
+spec:
+  network:
+    vpcs:
+      - name: vpc
+        internet: false
+    subnets:
+      - name: default
+        vpc: vpc
+        cidr: "10.0.0.0/24"
+  vms:
+    - name: builder
+      source:
+        url: "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2"
+      resources:
+        cpu: 1
+        memory: "1Gi"
+      disks:
+        - name: rootdisk
+          size: "4Gi"
+      communicator:
+        sshUsername: debian
+      cloudInit:
+        userData: |
+          #cloud-config
+          ssh_authorized_keys: []
+      provisioners:
+        - name: set-password
+          type: shell
+          shell:
+            inline:
+              - echo "debian:debian" | sudo chpasswd
+        - name: manual-touch
+          type: handbuild
+          handbuild:
+            instructions: "Touch /var/hello on the VM, then send the continue signal."
+        - name: verify-touch
+          type: shell
+          shell:
+            inline:
+              - echo "=== Verifying /var/hello exists ==="
+              - test -f /var/hello
+  timeout: 60m

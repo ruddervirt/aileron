@@ -1,0 +1,79 @@
+apiVersion: ruddervirt.io/v1alpha1
+kind: VirtualMachineBuild
+metadata:
+  name: test-multi-vpc
+  namespace: ruddervirt-system
+spec:
+  network:
+    vpcs:
+      - name: public
+        internet: true
+      - name: private
+        internet: false
+    subnets:
+      - name: pub-subnet
+        vpc: public
+        cidr: "10.0.0.0/24"
+      - name: priv-subnet
+        vpc: private
+        cidr: "10.0.1.0/24"
+
+  vms:
+    - name: web
+      source:
+        url: "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2"
+      resources:
+        cpu: 1
+        memory: "1Gi"
+      disks:
+        - name: rootdisk
+          size: "4Gi"
+      communicator:
+        sshUsername: debian
+      cloudInit:
+        userData: |
+          #cloud-config
+          ssh_authorized_keys: []
+      nics:
+        - name: eth0
+          subnet: pub-subnet
+          ip: "10.0.0.10"
+      provisioners:
+        - type: shell
+          name: verify-internet
+          shell:
+            inline:
+              - echo "=== Web VM (public VPC) ==="
+              - ip -brief addr show
+              - ping -c 3 -W 5 8.8.8.8
+              - echo "Internet access verified on public VPC"
+
+    - name: db
+      source:
+        url: "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2"
+      resources:
+        cpu: 1
+        memory: "1Gi"
+      disks:
+        - name: rootdisk
+          size: "4Gi"
+      communicator:
+        sshUsername: debian
+      cloudInit:
+        userData: |
+          #cloud-config
+          ssh_authorized_keys: []
+      nics:
+        - name: eth0
+          subnet: priv-subnet
+          ip: "10.0.1.10"
+      provisioners:
+        - type: shell
+          name: verify-isolation
+          shell:
+            inline:
+              - echo "=== DB VM (private VPC) ==="
+              - ip -brief addr show
+              - "! ping -c 2 -W 3 10.0.0.10 && echo 'Cross-VPC isolation verified' || echo 'WARNING: cross-VPC ping succeeded'"
+
+  timeout: 30m

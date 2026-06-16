@@ -1,0 +1,136 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "aileron.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "aileron.labels" . | nindent 4 }}
+    control-plane: controller-manager
+spec:
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "aileron.selectorLabels" . | nindent 6 }}
+      control-plane: controller-manager
+  template:
+    metadata:
+      annotations:
+        timestamp: {{ now | quote }}
+      labels:
+        {{- include "aileron.selectorLabels" . | nindent 8 }}
+        control-plane: controller-manager
+    spec:
+      serviceAccountName: {{ include "aileron.serviceAccountName" . }}
+      terminationGracePeriodSeconds: 10
+      containers:
+        - name: manager
+          image: "{{ .Values.image.repository }}:{{ include "aileron.imageTag" . }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - /manager
+          args:
+            {{- if .Values.leaderElection.enabled }}
+            - --leader-elect
+            {{- end }}
+          env:
+            {{- if .Values.goMemLimit }}
+            - name: GOMEMLIMIT
+              value: {{ .Values.goMemLimit | quote }}
+            {{- end }}
+            {{- if .Values.goMaxProcs }}
+            - name: GOMAXPROCS
+              value: {{ .Values.goMaxProcs | quote }}
+            {{- end }}
+            {{- if .Values.debug }}
+            - name: DEBUG
+              value: "true"
+            {{- end }}
+            {{- if .Values.failureRetention }}
+            - name: FAILURE_RETENTION
+              value: "{{ .Values.failureRetention }}"
+            {{- end }}
+            - name: OPERATOR_NAMESPACE
+              value: "{{ .Release.Namespace }}"
+            - name: OPERATOR_IMAGE
+              value: "{{ .Values.image.repository }}:{{ include "aileron.imageTag" . }}"
+            - name: COORDINATOR_IMAGE
+              value: "{{ .Values.image.repository }}/coordinator:{{ include "aileron.imageTag" . }}"
+            {{- if .Values.grading.enabled }}
+            # Image for the per-VM grading Jobs scheduled by the GradeRequest
+            # reconciler. Defaults to the core grader image at the manager tag.
+            - name: GRADER_IMAGE
+              value: "{{ .Values.grading.graderImage | default (printf "%s/grader:%s" .Values.image.repository (include "aileron.imageTag" .)) }}"
+            {{- if .Values.grading.bootWaitSeconds }}
+            - name: GRADER_BOOT_WAIT_SECONDS
+              value: {{ .Values.grading.bootWaitSeconds | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if .Values.imagePullSecrets }}
+            - name: IMAGE_PULL_SECRETS
+              value: "{{ range $i, $s := .Values.imagePullSecrets }}{{ if $i }},{{ end }}{{ $s.name }}{{ end }}"
+            {{- end }}
+            {{- if .Values.vmResources }}
+            - name: VM_CPU_REQUEST
+              value: "{{ .Values.vmResources.cpu }}"
+            - name: VM_MEMORY_REQUEST
+              value: "{{ .Values.vmResources.memory }}"
+            {{- end }}
+            {{- if .Values.vncGateway.enabled }}
+            # Coordinator boot commands go through the core vncgateway's
+            # (unauthenticated, ClusterIP-only) Guacamole listener.
+            - name: VNC_SERVICE_URL
+              value: "ws://{{ include "aileron.fullname" . }}-vncgateway.{{ .Release.Namespace }}.svc:{{ .Values.vncGateway.port }}"
+            {{- end }}
+            {{- with .Values.buildLimits }}
+            {{- if .maxCPU }}
+            - name: BUILD_LIMIT_MAX_CPU
+              value: "{{ .maxCPU }}"
+            {{- end }}
+            {{- if .maxMemory }}
+            - name: BUILD_LIMIT_MAX_MEMORY
+              value: "{{ .maxMemory }}"
+            {{- end }}
+            {{- if .maxDiskSize }}
+            - name: BUILD_LIMIT_MAX_DISK_SIZE
+              value: "{{ .maxDiskSize }}"
+            {{- end }}
+            {{- if .maxDiskCount }}
+            - name: BUILD_LIMIT_MAX_DISK_COUNT
+              value: "{{ .maxDiskCount }}"
+            {{- end }}
+            {{- if .maxVMCount }}
+            - name: BUILD_LIMIT_MAX_VM_COUNT
+              value: "{{ .maxVMCount }}"
+            {{- end }}
+            {{- end }}
+          ports:
+            - name: health
+              containerPort: 8081
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true

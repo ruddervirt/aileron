@@ -1,0 +1,10 @@
+---
+# Clone test: clones the ISO install build and verifies VMs are created.
+apiVersion: ruddervirt.io/v1alpha1
+kind: VirtualMachineClone
+metadata:
+  name: clone-iso-install
+  namespace: ruddervirt-system
+spec:
+  templateName: test-iso-install
+  timeout: 30m
