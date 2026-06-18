@@ -99,8 +99,6 @@ push: generate
 # kept in sync with source of truth by `make generate`. No explicit
 # kubectl apply here — Helm owns the CRD lifecycle on install/upgrade.
 deploy:
-	kubectl $(KCTL_CTX_ARG) -n $(HELM_NAMESPACE) patch serviceaccount default \
-		-p '{"imagePullSecrets":[{"name":"ghcr-pull-secret"}]}' 2>/dev/null || true
 	helm $(HELM_CTX_ARG) upgrade --install $(HELM_RELEASE) ./chart/aileron \
 		--namespace $(HELM_NAMESPACE) --create-namespace \
 		--take-ownership \

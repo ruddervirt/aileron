@@ -22,8 +22,11 @@ debug: false
 # Accepts any Go duration string (e.g. "30m", "1h", "90s").
 failureRetention: "30m"
 
-imagePullSecrets:
-  - name: ghcr-pull-secret
+# Image pull secrets for private registries. Empty by default; set per-zone if
+# your registry requires authentication, e.g.:
+#   imagePullSecrets:
+#     - name: my-registry-secret
+imagePullSecrets: []
 
 replicaCount: 1
 

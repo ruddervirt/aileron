@@ -7,19 +7,20 @@ vncproxy/vncmux/vncroute stack in June 2026.
 ## Open-source / proprietary split
 
 The gateway is part of the OPEN-SOURCE aileron core: boot commands and
-console viewing must work in a standalone aileron install (no NATS, no
-external UI, no stabilizer). The core gateway is therefore deliberately
+console viewing must work in a standalone aileron install (no external UI,
+no external auth proxy). The core gateway is therefore deliberately
 **authentication-free and cluster-internal** (ClusterIP only, never exposed
 by an ingress). Authenticated external access is a separate, proprietary
-concern: the **stabilizer vncauthproxy** (Go, `stabilizer/cmd/vncauthproxy`)
-terminates the ingress, validates the UI's RS256 JWTs (keys embedded in the
-stabilizer module only — they never enter open-source images), and
-byte-relays the websocket to the core gateway. Anyone running aileron
+concern: the **vncauthproxy** (a Go service in a separate, closed-source
+repo — not in this tree) terminates the ingress, validates the UI's RS256
+JWTs (keys embedded in that proprietary module only — they never enter
+open-source images), and byte-relays the websocket to the core gateway.
+Anyone running aileron
 standalone brings their own equivalent edge, or uses the console only
 in-cluster (debug viewer, `kubectl port-forward`).
 
 ```
-browser ── wss /vncgateway/{buildID}/{vm}?authorization=JWT ─► [stabilizer vncauthproxy :7777]  (proprietary)
+browser ── wss /vncgateway/{buildID}/{vm}?authorization=JWT ─► [vncauthproxy :7777]  (proprietary, out-of-tree)
                                                                   JWT + origin + claims · byte relay
                                                                   │ ws /internal/{ns}/{vmi}?reattach=1
 coordinator ─ ws /internal/{namespace}/{vmiName} ────────────────┤
@@ -122,7 +123,7 @@ fail-safe: parse desync turns detection off, never disturbs the pipe).
 ## How a client experiences the lifecycle
 
 1. **Connect** (any time, even before the VM exists). Browsers go through
-   the stabilizer vncauthproxy (JWT validated there; it maps
+   the proprietary vncauthproxy (JWT validated there; it maps
    `{buildID}/{vm}` to `{namespace}/{vmiName}`, appends `?reattach=1`, and
    relays); the coordinator and in-cluster tools hit the gateway directly.
    The upgrade completes immediately; while the console doesn't exist the
@@ -155,12 +156,12 @@ fail-safe: parse desync turns detection off, never disturbs the pipe).
 | `lib/wsfacade.js` | Keeps the browser socket alive across session deaths; swallows terminal instructions; tracks size for blanking |
 | `lib/guacd-patch.js` | Neutralizes guacamole-lite's 10s guacd-silence kill (static screens are legitimately silent); makes guacd `error` instructions fatal |
 | `lib/tokens.js` / `lib/path.js` | Internal AES token minting (clients never see tokens), dns1123 path validation |
-| `stabilizer/cmd/vncauthproxy` (proprietary) | Ingress edge: RS256 JWT (kid = embedded PEM filename, `stabilizer/internal/auth`), origin allowlist, claims-vs-path check, websocket byte relay to the core gateway; also serves the rvvstatus `/healthz` (basic auth + node count) |
+| `lib/bridge.js` | Talks to the vncbridge tunnel API (`POST /tunnels`, `/probe`); console-reachability probing |
+| vncauthproxy (proprietary, out-of-tree) | Ingress edge in a separate, closed-source repo (not in this tree, not in this chart): RS256 JWT (kid = embedded PEM filename), origin allowlist, claims-vs-path check, websocket byte relay to the core gateway; also serves the rvvstatus `/healthz` (basic auth + node count) |
 | `public/debug.html` | guacamole-common-js viewer + screenshot button (`hack/vncview.sh` opens it) |
 | `internal/vncbridge` (+ `cmd/vncbridge`) | Per-VMI localhost TCP listeners piping to the KubeVirt VNC websocket; `POST /tunnels`, `POST /probe`; RFB geometry tracker; idle reaping; plain `/healthz` only |
 | `internal/build/guacclient` | Minimal Go Guacamole client for the coordinator: key events, sync echo, display-gated readiness |
-| `chart/aileron/templates/vncgateway.yaml` | Core 3-container pod (gated on `vncGateway.enabled` only — works without stabilizer); guacd binds loopback (no auth → must never leave the pod; no TCP probe possible — kubelet dials the pod IP) |
-| `chart/aileron/templates/stabilizer-vncauthproxy.yaml` | Proprietary edge Deployment + Service + Ingress, gated on `stabilizer.enabled` |
+| `chart/aileron/templates/vncgateway.yaml` | Core 3-container pod (gated on `vncGateway.enabled` only — works standalone); guacd binds loopback (no auth → must never leave the pod; no TCP probe possible — kubelet dials the pod IP) |
 
 ## Guacamole error codes seen in the wild
 
@@ -193,4 +194,4 @@ every 10s on static installer menus (guacamole-lite's hardcoded inactivity
 timer); guacd 1.6's display regressions; and the per-viewer-connection
 refactor that was reverted when the one-connection-per-VMI kick behavior was
 finally proven. Details with measurements live in the session memory and the
-git history of `stabilizer/vncgateway/` and `stabilizer/internal/vncbridge/`.
+git history of `vncgateway/` and `internal/vncbridge/`.
