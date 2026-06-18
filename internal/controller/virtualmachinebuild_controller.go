@@ -56,6 +56,17 @@ const (
 
 	// ServiceAccountName is the service account used by the controller.
 	ServiceAccountName = "aileron-controller-manager"
+
+	// cdiImporterAppLabel is the value of the "app" label CDI stamps on its
+	// importer worker pods (including the populator "prime" importer,
+	// importer-prime-<target-pvc-uid>). These pods are created by CDI, not
+	// aileron, so they do not carry our build-id label.
+	cdiImporterAppLabel = "containerized-data-importer"
+
+	// cdiImportPVCNameAnnotation on a CDI importer pod names the PVC it is
+	// importing into. For the legacy (non-populator) importer this is the
+	// build's target PVC; for the populator importer it is the prime PVC.
+	cdiImportPVCNameAnnotation = "cdi.kubevirt.io/storage.import.importPvcName"
 )
 
 // OperatorNamespace returns the namespace where the controller runs.
@@ -702,7 +713,16 @@ func (r *VirtualMachineBuildReconciler) cleanupBuildResources(ctx context.Contex
 		client.MatchingLabels{build.LabelBuildID: buildID},
 	}
 
-	remaining := 0
+	// Delete CDI importer pods (and their populator "prime" PVCs) first. These
+	// are created by CDI without our build-id label, so the label-driven pass
+	// below misses them; normally they're reaped via owner-reference GC
+	// (target PVC -> prime PVC -> importer pod), but a failed import can break
+	// that chain, leaving an importer-prime-* pod that retries and errors
+	// forever. Running this before we delete the labeled target PVCs lets us
+	// resolve their UIDs (the importer-prime-<uid> pods are named after them)
+	// and releases the prime PVC before we remove it.
+	remaining := r.cleanupImporterPods(ctx, buildNS, buildID)
+
 	for _, gvk := range []schema.GroupVersionKind{
 		{Group: "kubevirt.io", Version: "v1", Kind: "VirtualMachineInstance"},
 		{Group: "kubevirt.io", Version: "v1", Kind: "VirtualMachine"},
@@ -742,6 +762,101 @@ func (r *VirtualMachineBuildReconciler) cleanupBuildResources(ctx context.Contex
 	}
 
 	return remaining
+}
+
+// cleanupImporterPods deletes the CDI importer pods (and orphaned populator
+// "prime" PVCs) that belong to a build. CDI creates these without aileron's
+// build-id label, so cleanupBuildResources' label-driven deletion misses them;
+// for a failed import the owner-reference GC chain that would otherwise reap
+// them can break, leaving an importer-prime-<uid> pod retrying and erroring
+// indefinitely. Returns the number of importer objects a delete was issued for
+// so the caller keeps requeueing until they are gone.
+func (r *VirtualMachineBuildReconciler) cleanupImporterPods(ctx context.Context, buildNS, buildID string) int {
+	logger := logf.FromContext(ctx)
+
+	// The build's target PVCs carry our build-id label (CDI copies the
+	// DataVolume's labels onto the PVC it provisions). We match importer pods
+	// to the build by these PVCs' names and UIDs.
+	pvcList := &unstructured.UnstructuredList{}
+	pvcList.SetGroupVersionKind(schema.GroupVersionKind{Version: "v1", Kind: "PersistentVolumeClaim"})
+	if err := r.List(ctx, pvcList, client.InNamespace(buildNS), client.MatchingLabels{build.LabelBuildID: buildID}); err != nil {
+		logger.Error(err, "Failed to list PVCs for importer cleanup")
+		return 0
+	}
+	pvcNames := make(map[string]bool, len(pvcList.Items))
+	pvcUIDs := make(map[string]bool, len(pvcList.Items))
+	for i := range pvcList.Items {
+		pvcNames[pvcList.Items[i].GetName()] = true
+		pvcUIDs[string(pvcList.Items[i].GetUID())] = true
+	}
+	if len(pvcNames) == 0 {
+		return 0
+	}
+
+	remaining := 0
+
+	// Delete importer pods created for one of the build's PVCs.
+	podList := &unstructured.UnstructuredList{}
+	podList.SetGroupVersionKind(schema.GroupVersionKind{Version: "v1", Kind: "Pod"})
+	if err := r.List(ctx, podList, client.InNamespace(buildNS), client.MatchingLabels{"app": cdiImporterAppLabel}); err != nil {
+		logger.Error(err, "Failed to list importer pods for cleanup")
+	} else {
+		for i := range podList.Items {
+			pod := &podList.Items[i]
+			if !importerPodBelongsToBuild(pod, pvcNames, pvcUIDs) {
+				continue
+			}
+			if err := r.Delete(ctx, pod); err != nil && !errors.IsNotFound(err) {
+				logger.Error(err, "Failed to delete importer pod", "pod", pod.GetName())
+			} else {
+				logger.Info("Deleted orphaned CDI importer pod", "pod", pod.GetName(), "buildID", buildID)
+			}
+			remaining++
+		}
+	}
+
+	// Delete the populator "prime" PVCs (prime-<target-pvc-uid>) that back the
+	// importer-prime pods. CDI creates them without our label, so they won't be
+	// caught by the label-driven PVC deletion; deleting the importer pod above
+	// first means pvc-protection no longer pins them.
+	for uid := range pvcUIDs {
+		primePVC := &unstructured.Unstructured{}
+		primePVC.SetGroupVersionKind(schema.GroupVersionKind{Version: "v1", Kind: "PersistentVolumeClaim"})
+		primePVC.SetNamespace(buildNS)
+		primePVC.SetName("prime-" + uid)
+		if err := r.Delete(ctx, primePVC); err != nil {
+			if !errors.IsNotFound(err) {
+				logger.Error(err, "Failed to delete prime PVC", "pvc", primePVC.GetName())
+			}
+			continue
+		}
+		remaining++
+	}
+
+	return remaining
+}
+
+// importerPodBelongsToBuild reports whether a CDI importer pod was created for
+// one of the build's target PVCs. It recognizes the populator importer
+// (importer-prime-<target-pvc-uid>, matched by the UID in the pod name or an
+// owner reference) and the legacy importer (importer-<pvc-name>, matched by the
+// importPvcName annotation).
+func importerPodBelongsToBuild(pod *unstructured.Unstructured, pvcNames, pvcUIDs map[string]bool) bool {
+	if name := pod.GetAnnotations()[cdiImportPVCNameAnnotation]; name != "" && pvcNames[name] {
+		return true
+	}
+	podName := pod.GetName()
+	for uid := range pvcUIDs {
+		if strings.Contains(podName, uid) {
+			return true
+		}
+	}
+	for _, ref := range pod.GetOwnerReferences() {
+		if pvcUIDs[string(ref.UID)] {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *VirtualMachineBuildReconciler) recoverConflict() ctrl.Result {

@@ -22,14 +22,18 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	aileroniov1alpha1 "github.com/ruddervirt/aileron/api/v1alpha1"
+	"github.com/ruddervirt/aileron/internal/build"
 )
 
 var _ = Describe("VirtualMachineBuild Controller", func() {
@@ -93,6 +97,137 @@ var _ = Describe("VirtualMachineBuild Controller", func() {
 		})
 	})
 })
+
+var _ = Describe("importer pod cleanup", func() {
+	ctx := context.Background()
+
+	Describe("importerPodBelongsToBuild", func() {
+		const buildUID = "bf4ff158-c73a-46f7-a977-71606a460d90"
+		pvcNames := map[string]bool{"mybuild-vm0": true}
+		pvcUIDs := map[string]bool{buildUID: true}
+
+		newPod := func(name string) *unstructured.Unstructured {
+			p := &unstructured.Unstructured{}
+			p.SetName(name)
+			return p
+		}
+
+		It("matches a populator importer pod by the target PVC UID in its name", func() {
+			// importer-prime-<target-pvc-uid> — the shape the reported orphan had.
+			Expect(importerPodBelongsToBuild(newPod("importer-prime-"+buildUID), pvcNames, pvcUIDs)).To(BeTrue())
+		})
+
+		It("matches a legacy importer pod by the importPvcName annotation", func() {
+			p := newPod("importer-mybuild-vm0")
+			p.SetAnnotations(map[string]string{cdiImportPVCNameAnnotation: "mybuild-vm0"})
+			Expect(importerPodBelongsToBuild(p, pvcNames, pvcUIDs)).To(BeTrue())
+		})
+
+		It("matches an importer pod owned by one of the build's PVCs", func() {
+			p := newPod("importer-something")
+			p.SetOwnerReferences([]metav1.OwnerReference{{
+				Kind: "PersistentVolumeClaim", UID: types.UID(buildUID),
+			}})
+			Expect(importerPodBelongsToBuild(p, pvcNames, pvcUIDs)).To(BeTrue())
+		})
+
+		It("ignores an importer pod belonging to a different build", func() {
+			p := newPod("importer-prime-00000000-0000-0000-0000-000000000000")
+			p.SetAnnotations(map[string]string{cdiImportPVCNameAnnotation: "other-build-vm0"})
+			Expect(importerPodBelongsToBuild(p, pvcNames, pvcUIDs)).To(BeFalse())
+		})
+	})
+
+	Describe("cleanupImporterPods", func() {
+		It("deletes the build's importer-prime pod and prime PVC, leaving unrelated importers", func() {
+			const ns = "default"
+			const buildID = "cleanup-test-build"
+
+			// The build's target PVC. CDI copies the DataVolume's labels onto the
+			// PVC it provisions, so it carries our build-id label.
+			target := &corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      buildID + "-vm0",
+					Namespace: ns,
+					Labels:    map[string]string{build.LabelBuildID: buildID},
+				},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+					Resources: corev1.VolumeResourceRequirements{
+						Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, target)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, target) })
+
+			uid := string(target.UID)
+			Expect(uid).NotTo(BeEmpty())
+
+			// CDI populator artifacts: the prime PVC and its importer-prime pod.
+			primePVC := &corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "prime-" + uid, Namespace: ns},
+				Spec:       *target.Spec.DeepCopy(),
+			}
+			Expect(k8sClient.Create(ctx, primePVC)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, primePVC) })
+
+			importer := newImporterPod("importer-prime-"+uid, ns)
+			Expect(k8sClient.Create(ctx, importer)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, importer) })
+
+			// An importer pod for a different build must be left untouched.
+			other := newImporterPod("importer-prime-00000000-0000-0000-0000-000000000000", ns)
+			Expect(k8sClient.Create(ctx, other)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, other) })
+
+			r := &VirtualMachineBuildReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			r.cleanupImporterPods(ctx, ns, buildID)
+
+			// The build's importer-prime pod and prime PVC are torn down.
+			Eventually(func() bool { return deletedOrGone(ctx, importer) }).Should(BeTrue())
+			Eventually(func() bool { return deletedOrGone(ctx, primePVC) }).Should(BeTrue())
+
+			// The unrelated importer survives.
+			fetched := &corev1.Pod{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(other), fetched)).To(Succeed())
+			Expect(fetched.DeletionTimestamp).To(BeNil())
+		})
+	})
+})
+
+// newImporterPod builds a stand-in for a CDI importer worker pod: the only
+// fields cleanupImporterPods keys off are the name and the CDI app label.
+func newImporterPod(name, ns string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: ns,
+			Labels:    map[string]string{"app": cdiImporterAppLabel},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "importer", Image: "cdi-importer"}},
+		},
+	}
+}
+
+// deletedOrGone reports whether obj is absent or has been marked for deletion.
+// envtest runs no kubelet, so a deleted pod lingers in Terminating with a
+// DeletionTimestamp rather than disappearing — both count as "cleaned up".
+func deletedOrGone(ctx context.Context, obj client.Object) bool {
+	fetched, ok := obj.DeepCopyObject().(client.Object)
+	if !ok {
+		return false
+	}
+	err := k8sClient.Get(ctx, client.ObjectKeyFromObject(obj), fetched)
+	if errors.IsNotFound(err) {
+		return true
+	}
+	if err != nil {
+		return false
+	}
+	return fetched.GetDeletionTimestamp() != nil
+}
 
 // buildWithNICs returns a minimal VirtualMachineBuild whose pendingHandler.Handle
 // will exercise the network validator: one VM with a containerDisk source, one
