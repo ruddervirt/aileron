@@ -2,7 +2,7 @@ image:
   repository: ghcr.io/ruddervirt/aileron
   # Empty inherits .Chart.AppVersion (set at release time), so a versioned chart
   # pins every aileron image to its release. Local dev overrides via
-  # `--set image.tag=<sha>` (see `make deploy`). Per-component tags below ("")
+  # `--set image.tag=<sha>` at install time. Per-component tags below ("")
   # likewise inherit this resolved tag.
   tag: ""
   pullPolicy: Always

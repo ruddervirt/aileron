@@ -647,6 +647,7 @@ func (r *VirtualMachineCloneReconciler) handlePowerManagement(ctx context.Contex
 	}
 
 	changed := false
+	scaleFailed := false
 	if vmClone.Status.Network != nil {
 		for _, gwName := range vmClone.Status.Network.EgressGatewaysCreated {
 			var replicas int64
@@ -655,6 +656,7 @@ func (r *VirtualMachineCloneReconciler) handlePowerManagement(ctx context.Contex
 			}
 			if err := network.ScaleEgressGateway(ctx, r.Client, gwName, cloneNS, replicas); err != nil {
 				logger.Error(err, "Failed to scale egress gateway", "gateway", gwName)
+				scaleFailed = true
 			}
 		}
 		if egressEnabled != vmClone.Status.EgressGatewayReady {
@@ -662,8 +664,11 @@ func (r *VirtualMachineCloneReconciler) handlePowerManagement(ctx context.Contex
 		}
 	}
 
-	// Update status.
-	vmClone.Status.EgressGatewayReady = egressEnabled
+	// Update status. Only report the new state if every gateway actually
+	// scaled — otherwise EgressGatewayReady would claim a state we never reached.
+	if !scaleFailed {
+		vmClone.Status.EgressGatewayReady = egressEnabled
+	}
 
 	if err := r.Client.Status().Update(ctx, vmClone); err != nil {
 		if errors.IsConflict(err) {
@@ -674,6 +679,12 @@ func (r *VirtualMachineCloneReconciler) handlePowerManagement(ctx context.Contex
 
 	if changed {
 		logger.Info("Egress gateway state changed", "enabled", egressEnabled, "anyVMRunning", anyVMRunning)
+	}
+
+	// Retry soon if a gateway failed to scale so we converge instead of waiting
+	// a full poll interval with the wrong replica count.
+	if scaleFailed {
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
 	// Poll periodically to detect VM power changes (VMI creation/deletion).

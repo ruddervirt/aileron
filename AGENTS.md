@@ -28,16 +28,20 @@
 
 All resources for a build use `{buildID}-` prefix `vm-`. All resources for a clone use `{cloneID}-` prefix `ns-`.
 
-## Build & Deploy
+## Build & Package
 
-Local dev loop (builds SHA-tagged images and helm-upgrades the working tree's chart):
+This repo only builds/versions the images and produces the Helm chart — it never
+deploys to a cluster. Deployment is owned by the consuming environments, which
+pull the published images and chart.
 
 ```bash
-make install    # lint + test + push + deploy (helm upgrade, uses KUBE_CONTEXT=direct)
+make build      # build SHA-tagged images locally
+make push       # build + push images to the registry
+make helm-publish CHART_VERSION=1.2.3   # package + push the versioned OCI chart
 ```
 
-`build`, `push`, `deploy` chain to `generate`; `install` runs `lint test push deploy`.
-The image tag is auto-generated from the git SHA. Helm chart is at `chart/aileron/`.
+`build` and `push` chain to `generate`. The image tag is auto-generated from the
+git SHA. Helm chart is at `chart/aileron/`.
 
 **Releases (how zones get deployed):** push a `vX.Y.Z` git tag. `.github/workflows/release.yml`
 then builds every image tagged `:vX.Y.Z` and publishes a versioned OCI Helm chart to

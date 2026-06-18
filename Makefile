@@ -7,15 +7,9 @@ TAG        ?= $(GIT_SHA)$(GIT_DIRTY)
 # release builds leave it false). See docker-bake.hcl.
 MOVE_LATEST ?= false
 
-HELM_RELEASE   ?= aileron
-HELM_NAMESPACE ?= ruddervirt-system
-KUBE_CONTEXT   ?= direct
-
 # OCI registry the versioned Helm chart is published to (see `helm-publish`).
 # Zones consume from $(HELM_OCI_REPO)/aileron --version <X.Y.Z>.
 HELM_OCI_REPO ?= oci://ghcr.io/ruddervirt/charts
-
-HELM_TIMEOUT ?= 120s
 
 CONTROLLER_GEN ?= bin/controller-gen
 ENVTEST        ?= $(shell pwd)/bin/setup-envtest
@@ -29,12 +23,7 @@ KIND_CLUSTER_NAME ?= aileron-test
 BAKE_FILES ?=
 DOCKER_BAKE := IMAGE_BASE=$(IMAGE_REPO) SHA_TAG=$(TAG) MOVE_LATEST=$(MOVE_LATEST) docker buildx bake $(BAKE_FILES)
 
-# Empty KUBE_CONTEXT skips the --context/--kube-context flag (CI relies on
-# whatever context the kubeconfig already selects).
-HELM_CTX_ARG := $(if $(KUBE_CONTEXT),--kube-context=$(KUBE_CONTEXT))
-KCTL_CTX_ARG := $(if $(KUBE_CONTEXT),--context=$(KUBE_CONTEXT))
-
-.PHONY: build push install deploy helm-publish generate sync-chart-crds verify-crds lint test test-e2e check
+.PHONY: build push helm-publish generate sync-chart-crds verify-crds lint test test-e2e check
 
 # Authoritative CRD sources. Anything added here is copied into the chart by
 # sync-chart-crds and checked by verify-crds, so chart/templates/crds/ never
@@ -88,31 +77,10 @@ verify-crds: $(CONTROLLER_GEN)
 build: generate
 	$(DOCKER_BAKE) --load
 
-# Same bake graph, pushed straight to the registry — used by CI and by
-# `make install` for remote-cluster deploys.
+# Same bake graph, pushed straight to the registry — used by CI. Deployment
+# zones consume the published images + chart; this repo never deploys them.
 push: generate
 	$(DOCKER_BAKE) --push
-
-# Helm-only deploy. Assumes images already exist in the registry. CI calls this
-# after `make push`; locally `make install` chains push → deploy.
-# CRDs are shipped by the Helm chart (chart/aileron/templates/crds/),
-# kept in sync with source of truth by `make generate`. No explicit
-# kubectl apply here — Helm owns the CRD lifecycle on install/upgrade.
-deploy:
-	helm $(HELM_CTX_ARG) upgrade --install $(HELM_RELEASE) ./chart/aileron \
-		--namespace $(HELM_NAMESPACE) --create-namespace \
-		--take-ownership \
-		--set image.repository=$(IMAGE_REPO) \
-		--set image.tag=$(TAG) \
-		--set image.pullPolicy=Always \
-		--set grading.graderImage=$(IMAGE_REPO)/grader:$(TAG) \
-		--set vncGateway.image.repository=$(IMAGE_REPO)/vncgateway \
-		--set vncGateway.image.tag=$(TAG) \
-		--set vncGateway.bridgeImage.repository=$(IMAGE_REPO)/vncbridge \
-		--set vncGateway.bridgeImage.tag=$(TAG) \
-		--wait --timeout=$(HELM_TIMEOUT)
-
-install: lint test push deploy
 
 # Package the chart at a release version and push it to the OCI registry.
 # Used by the release workflow after `make push`. --version/--app-version stamp
@@ -127,7 +95,7 @@ helm-publish:
 	helm package chart/aileron --version $(CHART_VERSION) --app-version $(APP_VERSION) -d dist
 	helm push dist/aileron-$(CHART_VERSION).tgz $(HELM_OCI_REPO)
 
-# Run the same pre-deploy gates as the GitHub Actions workflow
+# Run the same CI gates as the GitHub Actions workflow
 # (lint + test + test-e2e), concurrently. Re-invokes make with -j3 so a
 # plain `make check` Just Works without the caller remembering to pass -j.
 # Note: test-e2e creates and tears down a local kind cluster named

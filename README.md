@@ -48,10 +48,13 @@ A Kubernetes operator for building repeatable "modules" of VMs. Aileron automate
 ## Developing
 
 ```bash
-make build     # Build the Docker image
-make push      # Build + push
-make install   # Build + push + helm deploy
+make build         # Build the Docker images locally
+make push          # Build + push images to the registry
+make helm-publish CHART_VERSION=1.2.3   # Package + push the versioned Helm chart
 ```
+
+Deployment is owned by the consuming environments, not this repo — they pull the
+published images and Helm chart. 
 
 ## Configuration
 

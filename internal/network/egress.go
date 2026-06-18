@@ -210,11 +210,17 @@ func ScaleEgressGateway(ctx context.Context, c client.Client, name, namespace st
 		return nil
 	}
 
+	// Patch only spec.replicas rather than doing a full-object Update. KubeOVN's
+	// own controller continuously writes this object (status, conditions,
+	// internalIPs), so a full Update races it and loses on resourceVersion
+	// conflicts, and round-tripping the whole spec back through KubeOVN's
+	// validating webhook risks rejection. A merge patch sends just the one field.
+	patch := client.MergeFrom(gw.DeepCopy())
 	if err := unstructured.SetNestedField(gw.Object, replicas, "spec", "replicas"); err != nil {
 		return fmt.Errorf("setting replicas on VpcEgressGateway %s: %w", name, err)
 	}
-	if err := c.Update(ctx, gw); err != nil {
-		return fmt.Errorf("updating VpcEgressGateway %s: %w", name, err)
+	if err := c.Patch(ctx, gw, patch); err != nil {
+		return fmt.Errorf("patching VpcEgressGateway %s: %w", name, err)
 	}
 	return nil
 }
