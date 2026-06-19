@@ -122,10 +122,15 @@ jobs:
                   gh release create "$TAG" --title "$TAG" --generate-notes --notes-file release-notes.md \
                       dist/aileron-crds.yaml
 
+    trigger-stabilizer:
+        needs: [publish]
+        runs-on: ubuntu-latest
+        timeout-minutes: 5
+        steps:
             - name: Trigger stabilizer release
               env:
                   GH_TOKEN: ${{ secrets.STABILIZER_TRIGGER }}
               run: |
                   gh api repos/${{ github.repository_owner }}/stabilizer/dispatches \
                       -f event_type=aileron-release \
-                      -F client_payload[version]="${{ steps.ver.outputs.image_tag }}"
+                      -F client_payload[version]="${{ github.ref_name }}"
