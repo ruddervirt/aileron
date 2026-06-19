@@ -3,6 +3,14 @@ GIT_SHA    := $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
 GIT_DIRTY  := $(shell git diff --quiet 2>/dev/null || echo -dirty)
 TAG        ?= $(GIT_SHA)$(GIT_DIRTY)
 
+# Reproducible builds: stamp images with the commit time (not wall-clock) so
+# rebuilding the same commit yields an identical digest. buildx auto-detects
+# SOURCE_DATE_EPOCH from the environment and clamps the image config's
+# `created`/history timestamps to it. Computed here (outside the build) because
+# the build context excludes .git; falls back to 0 if git is unavailable.
+SOURCE_DATE_EPOCH ?= $(shell git log -1 --pretty=%ct 2>/dev/null || echo 0)
+export SOURCE_DATE_EPOCH
+
 # Whether bake also moves the floating ":latest" tag (main-branch CI sets true;
 # release builds leave it false). See docker-bake.hcl.
 MOVE_LATEST ?= false
@@ -79,8 +87,12 @@ build: generate
 
 # Same bake graph, pushed straight to the registry — used by CI. Deployment
 # zones consume the published images + chart; this repo never deploys them.
+# rewrite-timestamp clamps file mtimes in freshly built layers to
+# SOURCE_DATE_EPOCH so a from-scratch rebuild of the same commit is byte-stable.
+# Set via --set (not --push) so it doesn't collide with any per-target output;
+# type=registry implies push.
 push: generate
-	$(DOCKER_BAKE) --push
+	$(DOCKER_BAKE) --set "*.output=type=registry,rewrite-timestamp=true"
 
 # Package the chart at a release version and push it to the OCI registry.
 # Used by the release workflow after `make push`. --version/--app-version stamp

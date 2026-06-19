@@ -1,0 +1,21 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended", "docker:pinDigests"],
+  "packageRules": [
+    {
+      "description": "Auto-merge base-image digest/patch bumps once CI is green",
+      "matchDatasources": ["docker"],
+      "matchUpdateTypes": ["pin", "digest", "patch"],
+      "groupName": "base image digests",
+      "automerge": true,
+      "platformAutomerge": true,
+      "schedule": ["before 6am on monday"]
+    },
+    {
+      "description": "Review base-image minor/major bumps manually",
+      "matchDatasources": ["docker"],
+      "matchUpdateTypes": ["minor", "major"],
+      "schedule": ["before 6am on monday"]
+    }
+  ]
+}
