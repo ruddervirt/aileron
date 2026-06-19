@@ -282,6 +282,8 @@ k8s.io/kube-openapi v0.0.0-20250910181357-589584f1c912 h1:Y3gxNAuB0OBLImH611+UDZ
 k8s.io/kube-openapi v0.0.0-20250910181357-589584f1c912/go.mod h1:kdmbQkyfwUagLfXIad1y2TdrjPFWp2Q89B3qkRwf/pQ=
 k8s.io/utils v0.0.0-20251002143259-bc988d571ff4 h1:SjGebBtkBqHFOli+05xYbK8YF1Dzkbzn+gDM4X9T4Ck=
 k8s.io/utils v0.0.0-20251002143259-bc988d571ff4/go.mod h1:OLgZIPagt7ERELqWJFomSt595RzquPNLL48iOWgYOg0=
+k8s.io/utils v0.0.0-20260617174310-a95e086a2553 h1:hmGqDecjc8d7HVzWzRFl0QD9bYuYKbBEG7t8xwnVxfI=
+k8s.io/utils v0.0.0-20260617174310-a95e086a2553/go.mod h1:xDxuJ0whA3d0I4mf/C4ppKHxXynQ+fxnkmQH0vTHnuk=
 libvirt.org/go/libvirtxml v1.12001.0 h1:UWCcBvPYXzCmwbEDFIJcVjuo00g9795ITaS4BygaNSg=
 libvirt.org/go/libvirtxml v1.12001.0/go.mod h1:7Oq2BLDstLr/XtoQD8Fr3mfDNrzlI3utYKySXF2xkng=
 sigs.k8s.io/apiserver-network-proxy/konnectivity-client v0.31.2 h1:jpcvIRr3GLoUoEKRkHKSmGjxb6lWwrBlJsXc+eUYQHM=
