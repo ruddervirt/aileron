@@ -9,12 +9,14 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"github.com/ruddervirt/aileron/internal/guac"
 )
 
 // fakeGateway upgrades to WebSocket, immediately sends a first instruction
-// (like guacamole-lite after guacd ready), then records received instructions
+// (like the gateway after guacd ready), then records received instructions
 // and periodically sends sync pings.
-func fakeGateway(t *testing.T, received chan<- *Instruction) *httptest.Server {
+func fakeGateway(t *testing.T, received chan<- *guac.Instruction) *httptest.Server {
 	t.Helper()
 	upgrader := websocket.Upgrader{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -25,10 +27,10 @@ func fakeGateway(t *testing.T, received chan<- *Instruction) *httptest.Server {
 		defer func() { _ = ws.Close() }()
 
 		// First server instruction: a size update, then a sync ping.
-		_ = ws.WriteMessage(websocket.TextMessage, Encode("size", "0", "1024", "768"))
-		_ = ws.WriteMessage(websocket.TextMessage, Encode("sync", "42"))
+		_ = ws.WriteMessage(websocket.TextMessage, guac.Encode("size", "0", "1024", "768"))
+		_ = ws.WriteMessage(websocket.TextMessage, guac.Encode("sync", "42"))
 
-		var dec Decoder
+		var dec guac.Decoder
 		for {
 			_, data, err := ws.ReadMessage()
 			if err != nil {
@@ -56,7 +58,7 @@ func wsURL(srv *httptest.Server) string {
 }
 
 func TestDialReadyAndSyncEcho(t *testing.T) {
-	received := make(chan *Instruction, 16)
+	received := make(chan *guac.Instruction, 16)
 	srv := fakeGateway(t, received)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -79,7 +81,7 @@ func TestDialReadyAndSyncEcho(t *testing.T) {
 }
 
 func TestSendKey(t *testing.T) {
-	received := make(chan *Instruction, 16)
+	received := make(chan *guac.Instruction, 16)
 	srv := fakeGateway(t, received)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -121,9 +123,9 @@ func TestDialFailsWhenClosedBeforeDisplayInstruction(t *testing.T) {
 		// Pre-VNC control traffic, exactly as observed live: connection-ID
 		// (empty opcode), then nop. A connection that dies after only this
 		// must still count as not-up-yet.
-		_ = ws.WriteMessage(websocket.TextMessage, Encode("", "$abc"))
-		_ = ws.WriteMessage(websocket.TextMessage, Encode("ready", "$abc"))
-		_ = ws.WriteMessage(websocket.TextMessage, Encode("nop"))
+		_ = ws.WriteMessage(websocket.TextMessage, guac.Encode("", "$abc"))
+		_ = ws.WriteMessage(websocket.TextMessage, guac.Encode("ready", "$abc"))
+		_ = ws.WriteMessage(websocket.TextMessage, guac.Encode("nop"))
 		_ = ws.Close()
 	}))
 	defer srv.Close()
@@ -136,7 +138,7 @@ func TestDialFailsWhenClosedBeforeDisplayInstruction(t *testing.T) {
 }
 
 func TestSendKeyFailsAfterClose(t *testing.T) {
-	received := make(chan *Instruction, 16)
+	received := make(chan *guac.Instruction, 16)
 	srv := fakeGateway(t, received)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -147,7 +149,7 @@ func TestSendKeyFailsAfterClose(t *testing.T) {
 	}
 	// Ask the fake gateway to drop the connection (httptest's
 	// CloseClientConnections does not cover hijacked websocket conns).
-	if err := c.write(Encode("quit")); err != nil {
+	if err := c.write(guac.Encode("quit")); err != nil {
 		t.Fatalf("write quit: %v", err)
 	}
 

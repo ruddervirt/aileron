@@ -1,4 +1,4 @@
-package guacclient
+package guac
 
 import (
 	"reflect"
@@ -122,5 +122,42 @@ func TestDecoderMalformed(t *testing.T) {
 		if _, err := d.Next(); err == nil {
 			t.Errorf("expected error for %q", raw)
 		}
+	}
+}
+
+// TestNextRawReturnsExactWireBytes verifies the raw slice the relay forwards is
+// byte-identical to what was fed, across an instruction boundary within one
+// feed (the relay drains all complete instructions before the next Feed).
+func TestNextRawReturnsExactWireBytes(t *testing.T) {
+	first := Encode("size", "0", "1024", "768")
+	second := Encode("img", "1", "14", "0", "0", "0")
+	var d Decoder
+	d.Feed(append(append([]byte{}, first...), second...))
+
+	ins, raw, err := d.NextRaw()
+	if err != nil {
+		t.Fatalf("NextRaw: %v", err)
+	}
+	if ins.Opcode != "size" {
+		t.Fatalf("opcode = %q, want size", ins.Opcode)
+	}
+	if string(raw) != string(first) {
+		t.Errorf("raw = %q, want %q", raw, first)
+	}
+
+	ins, raw, err = d.NextRaw()
+	if err != nil {
+		t.Fatalf("NextRaw: %v", err)
+	}
+	if ins.Opcode != "img" {
+		t.Fatalf("opcode = %q, want img", ins.Opcode)
+	}
+	if string(raw) != string(second) {
+		t.Errorf("raw = %q, want %q", raw, second)
+	}
+
+	ins, raw, err = d.NextRaw()
+	if err != nil || ins != nil || raw != nil {
+		t.Errorf("expected drained decoder, got ins=%+v raw=%q err=%v", ins, raw, err)
 	}
 }

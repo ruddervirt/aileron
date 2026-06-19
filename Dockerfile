@@ -17,7 +17,7 @@ COPY data/ data/
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -o manager cmd/main.go \
  && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -o onDefineDomain cmd/sidecar/main.go \
  && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -o coordinator cmd/coordinator/main.go \
- && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -o vncbridge cmd/vncbridge/main.go \
+ && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -o vncgateway cmd/vncgateway/main.go \
  && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -o aileron-ui cmd/aileron-ui/main.go \
  && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -o grader cmd/grader/main.go
 
@@ -39,11 +39,11 @@ USER 65532:65532
 ENTRYPOINT ["/grader"]
 
 # VNC bridge — aileron core (TCP <-> KubeVirt VNC WebSocket tunnels for guacd)
-FROM gcr.io/distroless/static:nonroot@sha256:963fa6c544fe5ce420f1f54fb88b6fb01479f054c8056d0f74cc2c6000df5240 AS vncbridge
+FROM gcr.io/distroless/static:nonroot@sha256:963fa6c544fe5ce420f1f54fb88b6fb01479f054c8056d0f74cc2c6000df5240 AS vncgateway
 LABEL org.opencontainers.image.source="https://github.com/ruddervirt/aileron"
-COPY --from=builder /workspace/vncbridge /vncbridge
+COPY --from=builder /workspace/vncgateway /vncgateway
 USER 65532:65532
-ENTRYPOINT ["/vncbridge"]
+ENTRYPOINT ["/vncgateway"]
 
 # aileron-ui — basic web interface (builds/clones submission, status, consoles).
 # Static frontend assets are embedded in the binary via go:embed.
@@ -52,18 +52,6 @@ LABEL org.opencontainers.image.source="https://github.com/ruddervirt/aileron"
 COPY --from=builder /workspace/aileron-ui /aileron-ui
 USER 65532:65532
 ENTRYPOINT ["/aileron-ui"]
-
-# VNC gateway — aileron core (guacamole-lite front for guacd; session sharing).
-# Authentication is NOT here: it lives in an external authenticated VNC proxy.
-FROM node:22-alpine@sha256:ab07539e0988b63558ff621f5fbe1077054c39d9809112974fb79993949d41cd AS vncgateway
-LABEL org.opencontainers.image.source="https://github.com/ruddervirt/aileron"
-WORKDIR /app
-COPY vncgateway/package.json vncgateway/package-lock.json ./
-RUN npm ci
-COPY vncgateway/ ./
-RUN npm test && npm prune --omit=dev
-USER node
-ENTRYPOINT ["node", "server.js"]
 
 # Coordinator (boot commands + provisioning)
 FROM gcr.io/distroless/static:nonroot@sha256:963fa6c544fe5ce420f1f54fb88b6fb01479f054c8056d0f74cc2c6000df5240 AS coordinator

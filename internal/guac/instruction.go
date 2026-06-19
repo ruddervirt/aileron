@@ -1,15 +1,9 @@
-// Package guacclient implements a minimal Guacamole protocol client used by
-// the coordinator to type boot commands through the vncgateway. The gateway
-// (guacamole-lite) performs the guacd handshake itself, so this client only
-// needs to send key events and keep the connection alive by echoing sync.
-//
-// Boot commands are timing-critical (ISO boot menus) and must never be typed
-// into a session whose VNC leg isn't attached — hence two deliberate
-// behaviors here: Dial only succeeds once DISPLAY output arrives (guacd
-// sends ready/sync before its VNC connection exists), and any server `error`
-// instruction kills the connection so the caller's reconnect-and-resend path
-// runs instead of keystrokes vanishing. See vncgateway/vncgateway.md.
-package guacclient
+// Package guac implements the Guacamole protocol wire codec shared by the VNC
+// gateway (internal/vncgateway), which speaks it to both clients and guacd, and
+// the coordinator's minimal client (internal/build/guacclient). The format is
+// LEN.VALUE,LEN.VALUE,...; where LEN is the element's length in UTF-8 code
+// points (not bytes). See docs/vncgateway.md for the surrounding architecture.
+package guac
 
 import (
 	"fmt"
@@ -57,6 +51,17 @@ func (d *Decoder) Feed(data []byte) {
 // Next returns the next complete instruction, or nil if the buffered data
 // does not yet contain one. A malformed stream returns an error.
 func (d *Decoder) Next() (*Instruction, error) {
+	ins, _, err := d.NextRaw()
+	return ins, err
+}
+
+// NextRaw is like Next but also returns the exact wire bytes of the returned
+// instruction (nil when no complete instruction is available yet). The
+// returned slice aliases the decoder's internal buffer and is only valid until
+// the next Feed call; the gateway relay forwards it immediately, before reading
+// (and feeding) more bytes, so aliasing is safe there. Copy it if you retain it
+// across a Feed.
+func (d *Decoder) NextRaw() (*Instruction, []byte, error) {
 	pos := 0
 	var elems []string
 
@@ -67,30 +72,30 @@ func (d *Decoder) Next() (*Instruction, error) {
 			i++
 		}
 		if i >= len(d.buf) {
-			return nil, nil // incomplete
+			return nil, nil, nil // incomplete
 		}
 		if i == pos {
-			return nil, fmt.Errorf("guac decode: expected length digit at offset %d, got %q", pos, d.buf[i])
+			return nil, nil, fmt.Errorf("guac decode: expected length digit at offset %d, got %q", pos, d.buf[i])
 		}
 		if d.buf[i] != '.' {
-			return nil, fmt.Errorf("guac decode: expected '.' after length at offset %d, got %q", i, d.buf[i])
+			return nil, nil, fmt.Errorf("guac decode: expected '.' after length at offset %d, got %q", i, d.buf[i])
 		}
 		n, err := strconv.Atoi(string(d.buf[pos:i]))
 		if err != nil {
-			return nil, fmt.Errorf("guac decode: bad length %q: %w", d.buf[pos:i], err)
+			return nil, nil, fmt.Errorf("guac decode: bad length %q: %w", d.buf[pos:i], err)
 		}
 
 		// Consume n UTF-8 code points.
 		j := i + 1
 		for range n {
 			if j >= len(d.buf) || !utf8.FullRune(d.buf[j:]) {
-				return nil, nil // incomplete
+				return nil, nil, nil // incomplete
 			}
 			_, size := utf8.DecodeRune(d.buf[j:])
 			j += size
 		}
 		if j >= len(d.buf) {
-			return nil, nil // terminator not yet received
+			return nil, nil, nil // terminator not yet received
 		}
 		elems = append(elems, string(d.buf[i+1:j]))
 
@@ -98,10 +103,11 @@ func (d *Decoder) Next() (*Instruction, error) {
 		case ',':
 			pos = j + 1
 		case ';':
+			raw := d.buf[:j+1]
 			d.buf = d.buf[j+1:]
-			return &Instruction{Opcode: elems[0], Args: elems[1:]}, nil
+			return &Instruction{Opcode: elems[0], Args: elems[1:]}, raw, nil
 		default:
-			return nil, fmt.Errorf("guac decode: expected ',' or ';' at offset %d, got %q", j, d.buf[j])
+			return nil, nil, fmt.Errorf("guac decode: expected ',' or ';' at offset %d, got %q", j, d.buf[j])
 		}
 	}
 }

@@ -33,13 +33,16 @@ type dialFunc func(ctx context.Context, namespace, vmi string) (*websocket.Conn,
 // Bridge exposes per-VMI localhost TCP listeners that pipe raw RFB bytes to
 // the KubeVirt VNC WebSocket subresource. It exists because guacd only
 // speaks plain TCP while KubeVirt's VNC is reachable only as a Kubernetes
-// API websocket. The vncgateway Node app requests listeners through the
-// localhost-only HTTP API (Handler); guacd then dials the returned port.
+// API websocket. The gateway requests listeners in-process (EnsureTunnel);
+// guacd then dials the returned localhost port.
 //
 // Beyond plumbing, the bridge is also where guest resolution changes are
 // detected (see rfbstream.go) — it is the only component that sees the raw
 // RFB stream, and KubeVirt's one-connection-per-VMI rule forbids watching
-// out-of-band. See vncgateway/vncgateway.md for the architecture.
+// out-of-band. See docs/vncgateway.md for the architecture.
+//
+// The gateway (internal/vncgateway) uses this in-process via EnsureTunnel and
+// Probe; the HTTP Handler below is retained for the bridge's own tests.
 type Bridge struct {
 	dial        dialFunc
 	idleTimeout time.Duration
@@ -107,7 +110,8 @@ func (b *Bridge) EnsureTunnel(_ context.Context, namespace, vmi string) (int, er
 // WARNING: KubeVirt allows only ONE VNC connection per VMI — probing while a
 // session is ACTIVE kicks that session. The gateway upholds this by only
 // probing when its registry has no session for the VM (waitForConsole in
-// server.js). Do not add new Probe callers without preserving that invariant.
+// internal/vncgateway). Do not add new Probe callers without preserving that
+// invariant.
 func (b *Bridge) Probe(ctx context.Context, namespace, vmi string) error {
 	ws, err := b.dial(ctx, namespace, vmi)
 	if err != nil {

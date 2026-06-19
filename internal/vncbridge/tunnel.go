@@ -22,7 +22,7 @@ import (
 // connection (Guacamole joins), so a tunnel has one active conn at a time.
 // The listener still accepts whatever arrives (a second accept during a
 // recycle race is normal); it must simply never be the layer that ASSUMES
-// concurrency is safe. See vncgateway/vncgateway.md.
+// concurrency is safe. See docs/vncgateway.md.
 type tunnel struct {
 	key       string
 	namespace string

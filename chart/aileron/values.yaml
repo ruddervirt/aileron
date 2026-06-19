@@ -120,13 +120,13 @@ aileronUI:
       cpu: "1"
       memory: 256Mi
 
-# vncGateway: OPEN-SOURCE aileron core for VM console viewing (guacd +
-# guacamole-lite + the vncbridge sidecar). Boot commands and clone/debug
-# consoles depend on it, so it is enabled by default and works standalone
-# (no external UI or message bus). It is cluster-internal and UNAUTHENTICATED
-# by design; external authenticated access is provided by a separate
-# authenticated VNC proxy. Full architecture and constraint
-# rationale: vncgateway/vncgateway.md.
+# vncGateway: OPEN-SOURCE aileron core for VM console viewing. One Go binary
+# (the session-sharing gateway merged with the in-process bridge) plus a guacd
+# sidecar. Boot commands and clone/debug consoles depend on it, so it is enabled
+# by default and works standalone (no external UI or message bus). It is
+# cluster-internal and UNAUTHENTICATED by design; external authenticated access
+# is provided by a separate authenticated VNC proxy. Full architecture and
+# constraint rationale: docs/vncgateway.md.
 # All viewers of a VM share ONE upstream VNC connection (KubeVirt limit); a
 # frontend should set background:#000 on the display container and retry on
 # close with ~1s backoff.
@@ -137,10 +137,6 @@ vncGateway:
   port: 7778
   image:
     repository: ghcr.io/ruddervirt/aileron/vncgateway
-    tag: ""
-    pullPolicy: Always
-  bridgeImage:
-    repository: ghcr.io/ruddervirt/aileron/vncbridge
     tag: ""
     pullPolicy: Always
   guacd:
@@ -184,39 +180,28 @@ vncGateway:
     # REQUIRED true on guacd 1.6.0 (see guacd image comment). QEMU ignores
     # client-driven resize, so nothing is lost.
     disableDisplayResize: true
-    # 0 disables the gateway-side inactivity kick: provisioner sessions are
-    # keyboard-quiet for many minutes during installs.
-    maxInactivityMs: 0
-    # 0 disables guacamole-lite's 10s "guacd silent" kill: static screens
-    # (installer menus, BIOS pauses, reboots) legitimately emit nothing.
-    # Real guacd death still tears down instantly via socket events.
-    guacdInactivityMs: 0
+    # Note: the old guacamole-lite inactivity timers (maxInactivityMs /
+    # guacdInactivityMs) are GONE — the Go relay has no inactivity kill, so
+    # static screens (installer menus, BIOS pauses, reboots) survive silence
+    # indefinitely and real guacd death still tears down via socket events.
   # Bridge tunnels (KubeVirt VNC websockets) are reaped after this long
-  # without an active guacd connection.
+  # without an active guacd connection. Consumed by the in-process bridge.
   tunnelIdleTimeout: "5m"
   # Clients connecting before the VM console exists are held (with keepalive
   # nops) and attached the moment it appears, up to this long. No frontend
   # retry loop needed for the boot window.
   consoleWaitMs: 600000
-  # Node app: one event loop relays every session's instructions for the whole
-  # cluster (single replica). JS is single-threaded so it can't exceed ~1 core
-  # of compute, but the higher limit gives headroom for libuv I/O + GC under
-  # hundreds of sessions; the V8 old-space cap keeps it inside the mem limit.
+  # The single Go process relays every session's instructions for the whole
+  # cluster (single replica) AND runs the in-process bridge (byte piping + the
+  # per-tunnel RFB geometry tracker). Sized for hundreds of concurrent
+  # consoles; GOMAXPROCS is pinned to the CPU limit and GOMEMLIMIT keeps the GC
+  # inside the memory limit.
   resources:
     requests:
-      cpu: 250m
-      memory: 256Mi
+      cpu: 300m
+      memory: 320Mi
     limits:
       cpu: "2"
       memory: 1Gi
-  # vncbridge (Go): pipes bytes + runs the per-connection RFB geometry tracker
-  # for every tunnel. Sized for hundreds of tunnels.
-  bridgeResources:
-    requests:
-      cpu: 50m
-      memory: 64Mi
-    limits:
-      cpu: "1"
-      memory: 512Mi
-  bridgeGoMemLimit: "400MiB"
-  bridgeGoMaxProcs: 1
+  goMemLimit: "900MiB"
+  goMaxProcs: 2

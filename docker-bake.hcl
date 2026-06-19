@@ -33,7 +33,6 @@ group "default" {
     "manager",
     "coordinator",
     "aileron-ui",
-    "vncbridge",
     "vncgateway",
     "egress-bridge",
     "helper",
@@ -85,13 +84,8 @@ target "grader" {
   tags     = tags_for("/grader", SHA_TAG)
 }
 
-# Core (aileron) VNC images: tagged with the aileron SHA_TAG.
-target "vncbridge" {
-  inherits = ["_common"]
-  target   = "vncbridge"
-  tags     = tags_for("/vncbridge", SHA_TAG)
-}
-
+# Core (aileron) VNC gateway: the merged Go gateway+bridge, tagged with the
+# aileron SHA_TAG. guacd is an upstream sidecar image, not built here.
 target "vncgateway" {
   inherits = ["_common"]
   target   = "vncgateway"

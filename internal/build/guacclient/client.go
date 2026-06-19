@@ -1,3 +1,14 @@
+// Package guacclient implements a minimal Guacamole protocol client used by
+// the coordinator to type boot commands through the vncgateway. The gateway
+// performs the guacd handshake itself, so this client only needs to send key
+// events and keep the connection alive by echoing sync.
+//
+// Boot commands are timing-critical (ISO boot menus) and must never be typed
+// into a session whose VNC leg isn't attached — hence two deliberate
+// behaviors here: Dial only succeeds once DISPLAY output arrives (guacd
+// sends ready/sync before its VNC connection exists), and any server `error`
+// instruction kills the connection so the caller's reconnect-and-resend path
+// runs instead of keystrokes vanishing. See docs/vncgateway.md.
 package guacclient
 
 import (
@@ -9,6 +20,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"github.com/ruddervirt/aileron/internal/guac"
 )
 
 // opSync is the Guacamole ping instruction; clients must echo its timestamp
@@ -75,7 +88,7 @@ func (c *Client) SendKey(keysym uint32, down bool) error {
 	if down {
 		pressed = "1"
 	}
-	return c.write(Encode("key", strconv.FormatUint(uint64(keysym), 10), pressed))
+	return c.write(guac.Encode("key", strconv.FormatUint(uint64(keysym), 10), pressed))
 }
 
 // Close tears down the connection.
@@ -116,7 +129,7 @@ func (c *Client) readLoop() {
 		_ = c.ws.Close()
 		close(c.done)
 	}()
-	var dec Decoder
+	var dec guac.Decoder
 	for {
 		_, data, err := c.ws.ReadMessage()
 		if err != nil {
@@ -156,18 +169,18 @@ func (c *Client) logEnd(cause string, err error) {
 	}
 }
 
-func (c *Client) handle(ins *Instruction) error {
+func (c *Client) handle(ins *guac.Instruction) error {
 	switch ins.Opcode {
 	case opSync:
 		// guacd drops clients that never acknowledge sync; echo the timestamp.
 		if len(ins.Args) > 0 {
-			return c.write(Encode(opSync, ins.Args[0]))
+			return c.write(guac.Encode(opSync, ins.Args[0]))
 		}
 	case "ready", "nop", "args", "":
 		// Control traffic emitted before the VNC leg is attached — not proof
 		// of a live console. "" is the connection-ID instruction (the
-		// Guacamole protocol uses an empty opcode for it), which
-		// guacamole-lite forwards immediately after the guacd handshake.
+		// Guacamole protocol uses an empty opcode for it); the gateway forwards
+		// a `ready` immediately after the guacd handshake.
 	case "error":
 		// guacd announces a dying connection (e.g. upstream VNC lost) with an
 		// error instruction before closing. Fail fast so the caller's

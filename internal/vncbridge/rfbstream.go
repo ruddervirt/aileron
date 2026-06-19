@@ -25,7 +25,7 @@ import (
 // advertises — the same set the old aileron vncproxy parser handled.
 // CONTRACT: if GUAC_ENCODINGS is ever widened to an encoding without a
 // deterministic wire length (tight!), detection silently turns off and
-// viewers stop following guest resolution changes. See vncgateway/vncgateway.md.
+// viewers stop following guest resolution changes. See docs/vncgateway.md.
 
 // RFB encodings (subset).
 const (
