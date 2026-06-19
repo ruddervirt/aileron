@@ -1,12 +1,9 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["config:recommended", "docker:pinDigests"],
+  "description": "Renovate only manages Dockerfile base images. enabledManagers excludes gomod, npm, github-actions, and the Helm chart (helm-values/helmv3) entirely.",
+  "enabledManagers": ["dockerfile"],
   "packageRules": [
-    {
-      "description": "Never touch the Helm chart — its image tags track the release appVersion, not Renovate pins",
-      "matchFileNames": ["chart/**"],
-      "enabled": false
-    },
     {
       "description": "Auto-merge base-image digest/patch bumps once CI is green",
       "matchDatasources": ["docker"],
