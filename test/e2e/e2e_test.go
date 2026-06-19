@@ -71,6 +71,10 @@ func TestCreateAndDeleteBuild(t *testing.T) {
 						"source": map[string]any{
 							"url": "https://example.com/disk.qcow2",
 						},
+						"resources": map[string]any{
+							"cpu":    "1",
+							"memory": "1Gi",
+						},
 					},
 				},
 			},
