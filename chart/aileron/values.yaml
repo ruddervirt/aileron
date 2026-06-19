@@ -4,7 +4,7 @@ image:
   # pins every aileron image to its release. Local dev overrides via
   # `--set image.tag=<sha>` at install time. Per-component tags below ("")
   # likewise inherit this resolved tag.
-  tag: ""
+  tag: "@sha256:92937ad7faf01c791dfad6cacd9524d85648540f5057dcccfbe516d052048eb1"
   pullPolicy: Always
 
 # Debug mode. When true, finished Jobs (floppy image, EFI copy, etc.)
@@ -102,7 +102,7 @@ aileronUI:
   enabled: true
   image:
     repository: ghcr.io/ruddervirt/aileron/aileron-ui
-    tag: ""        # empty inherits image.tag (the aileron SHA_TAG)
+    tag: "@sha256:d697cd14e28af8a424c0d0b0104e57608c6cf97eb4186b0740808ded12a0865e"        # empty inherits image.tag (the aileron SHA_TAG)
     pullPolicy: Always
   service:
     # NodePort to expose on each node. Empty = Kubernetes auto-assigns one in
@@ -137,7 +137,7 @@ vncGateway:
   port: 7778
   image:
     repository: ghcr.io/ruddervirt/aileron/vncgateway
-    tag: ""
+    tag: "@sha256:03c097cfe94a2830d9c8b72c0e0003ddd671446509ded14d92dc4f2a24cd6b71"
     pullPolicy: Always
   guacd:
     # Mirror to ghcr if Docker Hub rate limits bite (pull secrets are
@@ -149,7 +149,7 @@ vncGateway:
     # handling is not relied upon.
     image:
       repository: guacamole/guacd
-      tag: "1.5.5"
+      tag: "1.5.5@sha256:38232cae271361ef53db46faf5c49fe64049a1320a05b82c597425b69d6ce77e"
       pullPolicy: IfNotPresent
     # guacd forks ONE process per viewed VM (joins share it) and holds a
     # framebuffer + encode buffers each — roughly 30-50 MiB per active
