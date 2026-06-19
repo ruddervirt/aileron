@@ -267,19 +267,29 @@ spec:
                       description: resources overrides compute/storage for this VM.
                       properties:
                         cpu:
-                          default: 2
-                          description: cpu is the number of CPU cores. Defaults to
-                            2.
-                          format: int32
-                          type: integer
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          description: |-
+                            cpu is the amount of CPU for the VM. Required. May be fractional (e.g.
+                            "0.1" or "100m") to pack idle VMs densely; quote fractional values. The
+                            guest's vCPU core count is derived as ceil(cpu) with a minimum of 1, and
+                            this same value is used as the pod's CPU request
+                            (spec.domain.resources.requests.cpu).
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
                         memory:
                           anyOf:
                           - type: integer
                           - type: string
-                          default: 4Gi
-                          description: memory is the amount of RAM. Defaults to "4Gi".
+                          description: |-
+                            memory is the amount of RAM for the VM (e.g. "4Gi"). Required. Used as
+                            both the guest memory and the pod memory request.
                           pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                           x-kubernetes-int-or-string: true
+                      required:
+                      - cpu
+                      - memory
                       type: object
                   required:
                   - name

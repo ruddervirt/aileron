@@ -15,7 +15,7 @@ func makeVM(name string, cpu int32, memory string, disks ...v1alpha1.BuildDisk) 
 	return v1alpha1.BuildVM{
 		Name: name,
 		Resources: v1alpha1.BuildResources{
-			CPU:    cpu,
+			CPU:    *resource.NewQuantity(int64(cpu), resource.DecimalSI),
 			Memory: resource.MustParse(memory),
 		},
 		Disks: disks,
@@ -49,7 +49,7 @@ func TestEnforceLimits_NoLimitsConfigured(t *testing.T) {
 }
 
 func TestEnforceLimits_CPUClamp(t *testing.T) {
-	bl := &BuildLimits{MaxCPU: 4}
+	bl := &BuildLimits{MaxCPU: qty("4")}
 	spec := makeSpec(makeVM("server", 8, "4Gi"))
 	changed, msgs, err := bl.EnforceLimits(spec)
 	if err != nil {
@@ -58,8 +58,8 @@ func TestEnforceLimits_CPUClamp(t *testing.T) {
 	if !changed {
 		t.Fatal("expected spec change")
 	}
-	if spec.VMs[0].Resources.CPU != 4 {
-		t.Errorf("CPU = %d, want 4", spec.VMs[0].Resources.CPU)
+	if spec.VMs[0].Resources.CPU.Cmp(resource.MustParse("4")) != 0 {
+		t.Errorf("CPU = %s, want 4", spec.VMs[0].Resources.CPU.String())
 	}
 	if len(msgs) != 1 {
 		t.Errorf("msgs = %v, want 1 message", msgs)
@@ -67,7 +67,7 @@ func TestEnforceLimits_CPUClamp(t *testing.T) {
 }
 
 func TestEnforceLimits_CPUUnderLimit(t *testing.T) {
-	bl := &BuildLimits{MaxCPU: 8}
+	bl := &BuildLimits{MaxCPU: qty("8")}
 	spec := makeSpec(makeVM("server", 4, "4Gi"))
 	changed, _, err := bl.EnforceLimits(spec)
 	if err != nil || changed {
@@ -134,7 +134,7 @@ func TestEnforceLimits_VMCountFail(t *testing.T) {
 }
 
 func TestEnforceLimits_MultipleVMs(t *testing.T) {
-	bl := &BuildLimits{MaxCPU: 4, MaxMemory: qty("8Gi")}
+	bl := &BuildLimits{MaxCPU: qty("4"), MaxMemory: qty("8Gi")}
 	spec := makeSpec(
 		makeVM("small", 2, "4Gi"),   // under limits
 		makeVM("big", 16, "32Gi"),   // both clamped
@@ -147,14 +147,14 @@ func TestEnforceLimits_MultipleVMs(t *testing.T) {
 	if !changed {
 		t.Fatal("expected spec change")
 	}
-	if spec.VMs[0].Resources.CPU != 2 {
-		t.Errorf("small CPU changed unexpectedly: %d", spec.VMs[0].Resources.CPU)
+	if spec.VMs[0].Resources.CPU.Cmp(resource.MustParse("2")) != 0 {
+		t.Errorf("small CPU changed unexpectedly: %s", spec.VMs[0].Resources.CPU.String())
 	}
-	if spec.VMs[1].Resources.CPU != 4 {
-		t.Errorf("big CPU = %d, want 4", spec.VMs[1].Resources.CPU)
+	if spec.VMs[1].Resources.CPU.Cmp(resource.MustParse("4")) != 0 {
+		t.Errorf("big CPU = %s, want 4", spec.VMs[1].Resources.CPU.String())
 	}
-	if spec.VMs[2].Resources.CPU != 4 {
-		t.Errorf("medium CPU = %d, want 4 (unchanged)", spec.VMs[2].Resources.CPU)
+	if spec.VMs[2].Resources.CPU.Cmp(resource.MustParse("4")) != 0 {
+		t.Errorf("medium CPU = %s, want 4 (unchanged)", spec.VMs[2].Resources.CPU.String())
 	}
 	if spec.VMs[2].Resources.Memory.Cmp(resource.MustParse("8Gi")) != 0 {
 		t.Errorf("medium Memory = %s, want 8Gi", spec.VMs[2].Resources.Memory.String())
@@ -173,8 +173,8 @@ func TestLoadBuildLimits(t *testing.T) {
 	t.Setenv("BUILD_LIMIT_MAX_VM_COUNT", "3")
 
 	bl := LoadBuildLimits()
-	if bl.MaxCPU != 4 {
-		t.Errorf("MaxCPU = %d, want 4", bl.MaxCPU)
+	if bl.MaxCPU == nil || bl.MaxCPU.Cmp(resource.MustParse("4")) != 0 {
+		t.Errorf("MaxCPU = %v, want 4", bl.MaxCPU)
 	}
 	if bl.MaxMemory == nil || bl.MaxMemory.Cmp(resource.MustParse("8Gi")) != 0 {
 		t.Errorf("MaxMemory = %v, want 8Gi", bl.MaxMemory)

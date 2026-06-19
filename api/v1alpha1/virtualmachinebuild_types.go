@@ -111,9 +111,10 @@ type BuildVM struct {
 	// +required
 	Source BuildSource `json:"source"`
 
-	// resources defines compute resources for this VM.
-	// +optional
-	Resources BuildResources `json:"resources,omitempty"`
+	// resources defines compute resources for this VM. Required: cpu and
+	// memory must be set explicitly.
+	// +required
+	Resources BuildResources `json:"resources"`
 
 	// disks defines the disks attached to this VM.
 	// For url/sourcePvc/containerDisk/blank sources, the first disk is the boot
@@ -248,15 +249,18 @@ type ISOSource struct {
 
 // BuildResources defines compute resources for a build VM.
 type BuildResources struct {
-	// cpu is the number of CPU cores. Defaults to 2.
-	// +kubebuilder:default=2
-	// +optional
-	CPU int32 `json:"cpu,omitempty"`
+	// cpu is the amount of CPU for the VM. Required. May be fractional (e.g.
+	// "0.1" or "100m") to pack idle VMs densely; quote fractional values. The
+	// guest's vCPU core count is derived as ceil(cpu) with a minimum of 1, and
+	// this same value is used as the pod's CPU request
+	// (spec.domain.resources.requests.cpu).
+	// +required
+	CPU resource.Quantity `json:"cpu"`
 
-	// memory is the amount of RAM. Defaults to "4Gi".
-	// +kubebuilder:default="4Gi"
-	// +optional
-	Memory resource.Quantity `json:"memory,omitempty"`
+	// memory is the amount of RAM for the VM (e.g. "4Gi"). Required. Used as
+	// both the guest memory and the pod memory request.
+	// +required
+	Memory resource.Quantity `json:"memory"`
 }
 
 // BuildDisk defines a disk attached to a build VM.

@@ -66,9 +66,7 @@ published images and Helm chart.
 | `image.tag` | `""` | Image tag (empty inherits `.Chart.AppVersion`; override locally with `--set image.tag=<sha>`) |
 | `debug` | `false` | Retain finished Jobs and failed build resources for inspection |
 | `failureRetention` | `30m` | How long to keep failed build resources before cleanup (Go duration; ignored when `debug=true`) |
-| `vmResources.cpu` | `2` | CPU request per build/clone VM (controls scheduling concurrency) |
-| `vmResources.memory` | `4096Mi` | Memory request per build/clone VM |
-| `buildLimits.maxCPU` | `8` | Max CPU cores per VM, clamped at admission (0 = unlimited) |
+| `buildLimits.maxCPU` | `8` | Max CPU per VM, clamped at admission; quantity, may be fractional (empty/0 = unlimited) |
 | `buildLimits.maxMemory` | `16Gi` | Max memory per VM, clamped at admission (empty = unlimited) |
 | `buildLimits.maxDiskSize` | `50Gi` | Max size per disk, clamped at admission (empty = unlimited) |
 | `buildLimits.maxDiskCount` | `3` | Max disks per VM; exceeding fails the build (0 = unlimited) |

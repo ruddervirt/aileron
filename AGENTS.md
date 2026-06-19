@@ -58,7 +58,6 @@ The chart is self-versioning: image tags resolve from `.Chart.AppVersion`
 - **Relay-only SSH** — all VM access through a relay pod, no masquerade NICs
 - **Clone volumes** — PVC created directly from CSI snapshot (same namespace, no PV transfer)
 - **Network topology preserved** — template VMs carry a JSON annotation with the build's VPC/subnet/NIC topology; clones recreate equivalent resources with their own prefix
-- **VM resource requests** — configurable via Helm values (`vmResources.cpu`, `vmResources.memory`), controls scheduler concurrency
 
 ## Critical Rules
 

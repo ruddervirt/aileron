@@ -70,7 +70,7 @@ func effectiveVMResources(build *v1alpha1.VirtualMachineBuild, vmSpec *v1alpha1.
 		if o.Name != vmSpec.Name || o.Resources == nil {
 			continue
 		}
-		if o.Resources.CPU != 0 {
+		if !o.Resources.CPU.IsZero() {
 			result.CPU = o.Resources.CPU
 		}
 		if !o.Resources.Memory.IsZero() {

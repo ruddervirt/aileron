@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
-	"os"
 	"strings"
 
 	v1alpha1 "github.com/ruddervirt/aileron/api/v1alpha1"
@@ -14,6 +13,7 @@ import (
 	"github.com/ruddervirt/aileron/internal/network"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -210,6 +210,18 @@ func (v *VMBooter) checkLauncherPod(ctx context.Context, vmiName, namespace stri
 	return "", false
 }
 
+// cpuCores derives the guest's whole vCPU core count from a CPU quantity,
+// rounding up (a guest cannot have a fractional core) with a minimum of 1.
+// This decouples the guest topology from the (possibly fractional) pod CPU
+// request so idle VMs can overcommit: e.g. "100m" -> 1 core, "1.5" -> 2 cores.
+func cpuCores(q resource.Quantity) int64 {
+	cores := (q.MilliValue() + 999) / 1000
+	if cores < 1 {
+		return 1
+	}
+	return cores
+}
+
 func (v *VMBooter) buildVM(build *v1alpha1.VirtualMachineBuild, vmSpec *v1alpha1.BuildVM) (*unstructured.Unstructured, error) {
 	vmName := BuildNameForBuildVM(BuildID(build), vmSpec.Name)
 	dvName := BuildNameForBuildVMDataVolume(BuildID(build), vmSpec.Name)
@@ -218,15 +230,10 @@ func (v *VMBooter) buildVM(build *v1alpha1.VirtualMachineBuild, vmSpec *v1alpha1
 
 	// Resolve effective resources honoring buildOverrides. The base
 	// vmSpec.Resources is what the template VM (and thus clones) will use.
+	// cpu and memory are required by the API, so they are always set here.
 	resources := effectiveVMResources(build, vmSpec)
-	cpu := int64(resources.CPU)
-	if cpu == 0 {
-		cpu = 2
-	}
-	memory := resources.Memory.String()
-	if memory == "0" {
-		memory = "4Gi"
-	}
+	cores := cpuCores(resources.CPU)
+	cpuRequest := resources.CPU.String()
 
 	var cloudInitData map[string]any
 	if vmSpec.CloudInit != nil {
@@ -312,22 +319,14 @@ func (v *VMBooter) buildVM(build *v1alpha1.VirtualMachineBuild, vmSpec *v1alpha1
 		}
 	}
 
-	// Build domain spec.
-	// Apply global VM resource requests for scheduler pressure.
-	// The guest sees cpu cores and memory, but the pod requests the global values
-	// so the scheduler limits concurrency.
-	cpuRequest := fmt.Sprintf("%d", cpu)
-	memoryRequest := memory
-	if v := os.Getenv("VM_CPU_REQUEST"); v != "" {
-		cpuRequest = v
-	}
-	if v := os.Getenv("VM_MEMORY_REQUEST"); v != "" {
-		memoryRequest = v
-	}
+	// Build domain spec. cpuRequest mirrors the effective cpu quantity, so the
+	// guest's cores and its scheduler footprint come from the same per-VM knob;
+	// likewise the pod memory request is the VM's declared memory.
+	memoryRequest := resources.Memory.String()
 
 	domainSpec := map[string]any{
 		"cpu": map[string]any{
-			"cores": cpu,
+			"cores": cores,
 		},
 		// pc-i440fx-rhel7.6.0 is the only i440fx variant RHEL's qemu-kvm
 		// ships (frozen at 7.6.0; only q35 keeps getting newer revs). q35

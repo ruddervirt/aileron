@@ -15,7 +15,7 @@ import (
 // VirtualMachineBuild during the initialization reconcile. Zero/nil
 // values mean "no limit".
 type BuildLimits struct {
-	MaxCPU       int32              // max CPU cores per VM; 0 = unlimited
+	MaxCPU       *resource.Quantity // max CPU per VM; nil = unlimited
 	MaxMemory    *resource.Quantity // max memory per VM; nil = unlimited
 	MaxDiskSize  *resource.Quantity // max size per disk; nil = unlimited
 	MaxDiskCount int                // max disks per VM; 0 = unlimited
@@ -28,8 +28,9 @@ func LoadBuildLimits() *BuildLimits {
 	limits := &BuildLimits{}
 
 	if v := os.Getenv("BUILD_LIMIT_MAX_CPU"); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 32); err == nil && n > 0 {
-			limits.MaxCPU = int32(n)
+		q, err := resource.ParseQuantity(v)
+		if err == nil {
+			limits.MaxCPU = &q
 		}
 	}
 	if v := os.Getenv("BUILD_LIMIT_MAX_MEMORY"); v != "" {
@@ -93,13 +94,13 @@ func (bl *BuildLimits) EnforceLimits(spec *v1alpha1.VirtualMachineBuildSpec) (bo
 		}
 
 		// Clamp CPU.
-		if bl.MaxCPU > 0 && vm.Resources.CPU > bl.MaxCPU {
-			msg := fmt.Sprintf("VM %s: CPU clamped from %d to %d",
-				vm.Name, vm.Resources.CPU, bl.MaxCPU)
+		if bl.MaxCPU != nil && vm.Resources.CPU.Cmp(*bl.MaxCPU) > 0 {
+			msg := fmt.Sprintf("VM %s: CPU clamped from %s to %s",
+				vm.Name, vm.Resources.CPU.String(), bl.MaxCPU.String())
 			logger.Info("Clamping CPU", "vm", vm.Name,
-				"requested", vm.Resources.CPU, "max", bl.MaxCPU)
+				"requested", vm.Resources.CPU.String(), "max", bl.MaxCPU.String())
 			messages = append(messages, msg)
-			vm.Resources.CPU = bl.MaxCPU
+			vm.Resources.CPU = *bl.MaxCPU
 			changed = true
 		}
 
@@ -141,8 +142,8 @@ func (bl *BuildLimits) String() string {
 		return "<nil>"
 	}
 	var parts []string
-	if bl.MaxCPU > 0 {
-		parts = append(parts, fmt.Sprintf("maxCPU=%d", bl.MaxCPU))
+	if bl.MaxCPU != nil {
+		parts = append(parts, fmt.Sprintf("maxCPU=%s", bl.MaxCPU.String()))
 	}
 	if bl.MaxMemory != nil {
 		parts = append(parts, fmt.Sprintf("maxMemory=%s", bl.MaxMemory.String()))

@@ -51,12 +51,6 @@ goMaxProcs: 1
 leaderElection:
   enabled: true
 
-# Resource requests applied to every build/clone VM's virt-launcher pod.
-# Controls how many VMs can run concurrently on a node via scheduler pressure.
-vmResources:
-  cpu: "2"
-  memory: "4096Mi"
-
 # Resource limits enforced on VirtualMachineBuild resources at admission time.
 # CPU, memory, and disk size are silently clamped to the max. Disk count and
 # VM count violations fail the build. Values of 0 / empty = no limit.

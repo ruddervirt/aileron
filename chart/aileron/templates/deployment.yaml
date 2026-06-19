@@ -71,12 +71,6 @@ spec:
             - name: IMAGE_PULL_SECRETS
               value: "{{ range $i, $s := .Values.imagePullSecrets }}{{ if $i }},{{ end }}{{ $s.name }}{{ end }}"
             {{- end }}
-            {{- if .Values.vmResources }}
-            - name: VM_CPU_REQUEST
-              value: "{{ .Values.vmResources.cpu }}"
-            - name: VM_MEMORY_REQUEST
-              value: "{{ .Values.vmResources.memory }}"
-            {{- end }}
             {{- if .Values.vncGateway.enabled }}
             # Coordinator boot commands go through the core vncgateway's
             # (unauthenticated, ClusterIP-only) Guacamole listener.
