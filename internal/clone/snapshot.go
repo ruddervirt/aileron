@@ -198,6 +198,28 @@ func (s *SnapshotManager) BuildInitialVolumeStates(ctx context.Context, template
 	return states, nil
 }
 
+// snapshotRestoreState classifies whether a VolumeSnapshot can back a clone PVC.
+// terminal is true when the snapshot is gone or being deleted — a dead source the
+// CSI provisioner will never satisfy ("snapshot is currently being deleted"); such
+// a snapshot must never be wired into a new PVC. ready mirrors status.readyToUse.
+// The fetched snapshot is returned (nil when NotFound) so callers can read further
+// status fields without a second Get.
+func snapshotRestoreState(ctx context.Context, c client.Client, name, namespace string) (snap *unstructured.Unstructured, ready, terminal bool, err error) {
+	snapshot := &unstructured.Unstructured{}
+	snapshot.SetGroupVersionKind(volumeSnapshotGVK)
+	if err := c.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, snapshot); err != nil {
+		if errors.IsNotFound(err) {
+			return nil, false, true, nil
+		}
+		return nil, false, false, err
+	}
+	if snapshot.GetDeletionTimestamp() != nil {
+		return snapshot, false, true, nil
+	}
+	ready, _, _ = unstructured.NestedBool(snapshot.Object, "status", "readyToUse")
+	return snapshot, ready, false, nil
+}
+
 // EnsureBaseSnapshotReady ensures a VolumeSnapshot exists for the given volume state.
 // Returns true when the snapshot is ready to use.
 func (s *SnapshotManager) EnsureBaseSnapshotReady(ctx context.Context, cloneName string, state *v1alpha1.CloneVolumeStatus, templateNamespace string) (bool, error) {
@@ -279,28 +301,18 @@ func (s *SnapshotManager) EnsureBaseSnapshotReady(ctx context.Context, cloneName
 		}
 	}
 
-	// Check if snapshot is ready.
-	snapshot := &unstructured.Unstructured{}
-	snapshot.SetGroupVersionKind(volumeSnapshotGVK)
-	if err := s.Client.Get(ctx, types.NamespacedName{Name: state.SnapshotName, Namespace: templateNamespace}, snapshot); err != nil {
-		if errors.IsNotFound(err) {
-			// The snapshot we selected or created has vanished (e.g. deleted by
-			// an unrelated teardown). Forget it and reselect on the next pass.
-			state.SnapshotName = ""
-			return false, nil
-		}
+	// Check if snapshot is ready. A snapshot that has vanished (e.g. deleted by an
+	// unrelated teardown) or carries a deletion timestamp can't be used as a PVC
+	// data source — the CSI provisioner rejects it ("snapshot is currently being
+	// deleted"). Forget it and reselect or recreate on the next pass.
+	snapshot, readyToUse, terminal, err := snapshotRestoreState(ctx, s.Client, state.SnapshotName, templateNamespace)
+	if err != nil {
 		return false, fmt.Errorf("getting snapshot %s: %w", state.SnapshotName, err)
 	}
-
-	// A snapshot with a deletion timestamp can't be used as a PVC data source —
-	// the CSI provisioner rejects it ("snapshot is currently being deleted").
-	// Drop it and let the next pass select or create a live one.
-	if snapshot.GetDeletionTimestamp() != nil {
+	if terminal {
 		state.SnapshotName = ""
 		return false, nil
 	}
-
-	readyToUse, _, _ := unstructured.NestedBool(snapshot.Object, "status", "readyToUse")
 	if !readyToUse {
 		return false, nil
 	}

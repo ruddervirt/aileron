@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -67,11 +68,36 @@ func TestHookSidecarsJSON_DefaultImage(t *testing.T) {
 	}
 }
 
+// cloneTestNS is the shared namespace used across clone volume tests; template and
+// clone resources live in the operator namespace.
+const cloneTestNS = "ruddervirt-system"
+
+// readySnapshot builds a VolumeSnapshot unstructured with status.readyToUse=true so
+// EnsureClonePVC's pre-create validation accepts it as a live data source.
+func readySnapshot(name string) *unstructured.Unstructured {
+	snap := &unstructured.Unstructured{}
+	snap.SetGroupVersionKind(volumeSnapshotGVK)
+	snap.SetName(name)
+	snap.SetNamespace(cloneTestNS)
+	_ = unstructured.SetNestedField(snap.Object, true, "status", "readyToUse")
+	return snap
+}
+
+// seedSnapshot creates a ready snapshot in the fake client so a subsequent
+// EnsureClonePVC call gets past snapshot validation.
+func seedSnapshot(t *testing.T, c client.Client, name string) {
+	t.Helper()
+	if err := c.Create(context.Background(), readySnapshot(name)); err != nil {
+		t.Fatalf("seeding snapshot %s: %v", name, err)
+	}
+}
+
 func TestEnsureClonePVC_EFIVarsNaming(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = corev1.AddToScheme(scheme)
 
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+	seedSnapshot(t, c, "snap-efivars")
 	vm := &VolumeManager{Client: c}
 
 	state := &v1alpha1.CloneVolumeStatus{
@@ -82,7 +108,7 @@ func TestEnsureClonePVC_EFIVarsNaming(t *testing.T) {
 		RequestedStorage:  "256Mi",
 	}
 
-	_, err := vm.EnsureClonePVC(context.Background(), "ns-abc123", state, "ruddervirt-system")
+	_, err := vm.EnsureClonePVC(context.Background(), "ns-abc123", state, "ruddervirt-system", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,6 +123,7 @@ func TestEnsureClonePVC_DiskNaming(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+	seedSnapshot(t, c, "snap-rootdisk")
 	vm := &VolumeManager{Client: c}
 
 	state := &v1alpha1.CloneVolumeStatus{
@@ -107,7 +134,7 @@ func TestEnsureClonePVC_DiskNaming(t *testing.T) {
 		RequestedStorage:  "37Gi",
 	}
 
-	_, err := vm.EnsureClonePVC(context.Background(), "ns-abc123", state, "ruddervirt-system")
+	_, err := vm.EnsureClonePVC(context.Background(), "ns-abc123", state, "ruddervirt-system", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,6 +165,8 @@ func TestEnsureClonePVC_MultiDiskUnique(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+	seedSnapshot(t, c, "snap-rootdisk")
+	seedSnapshot(t, c, "snap-supplemental")
 	vm := &VolumeManager{Client: c}
 
 	boot := &v1alpha1.CloneVolumeStatus{
@@ -156,7 +185,7 @@ func TestEnsureClonePVC_MultiDiskUnique(t *testing.T) {
 	}
 
 	for _, s := range []*v1alpha1.CloneVolumeStatus{boot, extra} {
-		if _, err := vm.EnsureClonePVC(context.Background(), "ns-abc123", s, "ruddervirt-system"); err != nil {
+		if _, err := vm.EnsureClonePVC(context.Background(), "ns-abc123", s, "ruddervirt-system", nil); err != nil {
 			t.Fatalf("EnsureClonePVC(%s): %v", s.VolumeName, err)
 		}
 	}
@@ -534,5 +563,228 @@ func TestBuildInitialVolumeStates_NoEFIWithoutFirmware(t *testing.T) {
 	}
 	if len(states) != 1 {
 		t.Errorf("got %d states, want 1 (rootdisk only)", len(states))
+	}
+}
+
+// TestEnsureClonePVC_MissingSnapshotFailsFast is the core regression: when the
+// snapshot data source does not exist, EnsureClonePVC must fail fast (ErrSnapshotUnusable)
+// and must NOT create a PVC that could only spin Pending forever.
+func TestEnsureClonePVC_MissingSnapshotFailsFast(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+	vm := &VolumeManager{Client: c}
+
+	state := &v1alpha1.CloneVolumeStatus{
+		VolumeName:        "rootdisk",
+		SourceVMShortName: "module",
+		SnapshotName:      "snap-gone", // never created
+		StorageClassName:  "rook-ceph-block",
+		RequestedStorage:  "37Gi",
+	}
+
+	_, err := vm.EnsureClonePVC(context.Background(), "ns-abc123", state, "ruddervirt-system", nil)
+	if err == nil {
+		t.Fatal("expected error for missing snapshot, got nil")
+	}
+	if !IsSnapshotUnusable(err) {
+		t.Fatalf("error = %v, want ErrSnapshotUnusable", err)
+	}
+
+	// No PVC must have been created.
+	got := &corev1.PersistentVolumeClaim{}
+	err = c.Get(context.Background(), types.NamespacedName{
+		Name: "ns-abc123-module-rootdisk", Namespace: "ruddervirt-system",
+	}, got)
+	if err == nil {
+		t.Fatal("a PVC was created against a missing snapshot; want none")
+	}
+}
+
+// TestEnsureClonePVC_TerminatingSnapshotFailsFast covers the exact incident trigger:
+// the snapshot exists but is being deleted ("snapshot is currently being deleted").
+func TestEnsureClonePVC_TerminatingSnapshotFailsFast(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	// Create the snapshot with a finalizer, then delete it so the fake client keeps
+	// it with a deletionTimestamp set (terminating).
+	snap := readySnapshot("snap-terminating")
+	snap.SetFinalizers([]string{"test/hold"})
+	if err := c.Create(context.Background(), snap); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Delete(context.Background(), snap); err != nil {
+		t.Fatal(err)
+	}
+
+	vm := &VolumeManager{Client: c}
+	state := &v1alpha1.CloneVolumeStatus{
+		VolumeName:        "rootdisk",
+		SourceVMShortName: "module",
+		SnapshotName:      "snap-terminating",
+		StorageClassName:  "rook-ceph-block",
+		RequestedStorage:  "37Gi",
+	}
+
+	_, err := vm.EnsureClonePVC(context.Background(), "ns-abc123", state, "ruddervirt-system", nil)
+	if !IsSnapshotUnusable(err) {
+		t.Fatalf("error = %v, want ErrSnapshotUnusable", err)
+	}
+	got := &corev1.PersistentVolumeClaim{}
+	if c.Get(context.Background(), types.NamespacedName{
+		Name: "ns-abc123-module-rootdisk", Namespace: "ruddervirt-system",
+	}, got) == nil {
+		t.Fatal("a PVC was created against a terminating snapshot; want none")
+	}
+}
+
+// TestEnsureClonePVC_SetsOwnerReference verifies clone PVCs are owned by the clone's
+// VirtualMachineNamespace CR, so deleting the clone root garbage-collects its storage.
+func TestEnsureClonePVC_SetsOwnerReference(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+	seedSnapshot(t, c, "snap-rootdisk")
+	vm := &VolumeManager{Client: c}
+
+	owner := &v1alpha1.VirtualMachineNamespace{
+		ObjectMeta: metav1.ObjectMeta{Name: "ns-abc123", Namespace: "ruddervirt-system", UID: "owner-uid-1"},
+	}
+	state := &v1alpha1.CloneVolumeStatus{
+		VolumeName:        "rootdisk",
+		SourceVMShortName: "module",
+		SnapshotName:      "snap-rootdisk",
+		StorageClassName:  "rook-ceph-block",
+		RequestedStorage:  "37Gi",
+	}
+
+	if _, err := vm.EnsureClonePVC(context.Background(), "ns-abc123", state, "ruddervirt-system", owner); err != nil {
+		t.Fatal(err)
+	}
+
+	got := &corev1.PersistentVolumeClaim{}
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name: "ns-abc123-module-rootdisk", Namespace: "ruddervirt-system",
+	}, got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.OwnerReferences) != 1 {
+		t.Fatalf("ownerReferences = %d, want 1", len(got.OwnerReferences))
+	}
+	ref := got.OwnerReferences[0]
+	if ref.Kind != "VirtualMachineNamespace" || ref.Name != "ns-abc123" || ref.UID != "owner-uid-1" {
+		t.Errorf("ownerReference = %+v, want VMNS ns-abc123/owner-uid-1", ref)
+	}
+	if ref.Controller == nil || !*ref.Controller {
+		t.Error("ownerReference should be a controller reference")
+	}
+}
+
+// TestEnsureClonePVC_ForeignBindReleased guards against the cross-namespace hijack:
+// a clone PVC that statically adopted a PV aileron did not provision must be deleted
+// (releasing that PV), not accepted as ready.
+func TestEnsureClonePVC_ForeignBindReleased(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+
+	boundPVC := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "ns-abc123-module-efivars",
+			Namespace: "ruddervirt-system",
+			Labels:    map[string]string{"ruddervirt.io/clone": "ns-abc123"},
+		},
+		Spec:   corev1.PersistentVolumeClaimSpec{VolumeName: "pv-foreign"},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+	// A PV from another app: no CSI source, no provisioned-by annotation.
+	foreignPV := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: "pv-foreign"},
+		Spec: corev1.PersistentVolumeSpec{
+			PersistentVolumeSource: corev1.PersistentVolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{Path: "/mnt/data"},
+			},
+		},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(boundPVC, foreignPV).Build()
+	vm := &VolumeManager{Client: c}
+
+	state := &v1alpha1.CloneVolumeStatus{
+		VolumeName:                EFIVarsVolumeName,
+		SourceVMShortName:         "module",
+		PersistentVolumeClaimName: "ns-abc123-module-efivars",
+		SnapshotName:              "snap-efivars",
+		CSIDriver:                 "rook-ceph.rbd.csi.ceph.com",
+		StorageClassName:          "rook-ceph-block",
+		RequestedStorage:          "256Mi",
+	}
+
+	ready, err := vm.EnsureClonePVC(context.Background(), "ns-abc123", state, "ruddervirt-system", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ready {
+		t.Fatal("clone PVC bound to a foreign PV must not be reported ready")
+	}
+	// The mis-bound PVC must have been deleted to release the foreign PV.
+	got := &corev1.PersistentVolumeClaim{}
+	if c.Get(context.Background(), types.NamespacedName{
+		Name: "ns-abc123-module-efivars", Namespace: "ruddervirt-system",
+	}, got) == nil {
+		t.Fatal("mis-bound clone PVC was not deleted")
+	}
+}
+
+// TestEnsureClonePVC_LegitBindReady confirms a PVC bound to a PV that aileron's CSI
+// driver provisioned is accepted as ready.
+func TestEnsureClonePVC_LegitBindReady(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+
+	boundPVC := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "ns-abc123-module-rootdisk",
+			Namespace: "ruddervirt-system",
+			Labels:    map[string]string{"ruddervirt.io/clone": "ns-abc123"},
+		},
+		Spec:   corev1.PersistentVolumeClaimSpec{VolumeName: "pv-ceph"},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+	cephPV := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: "pv-ceph"},
+		Spec: corev1.PersistentVolumeSpec{
+			PersistentVolumeSource: corev1.PersistentVolumeSource{
+				CSI: &corev1.CSIPersistentVolumeSource{Driver: "rook-ceph.rbd.csi.ceph.com"},
+			},
+		},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(boundPVC, cephPV).Build()
+	vm := &VolumeManager{Client: c}
+
+	state := &v1alpha1.CloneVolumeStatus{
+		VolumeName:                "rootdisk",
+		SourceVMShortName:         "module",
+		PersistentVolumeClaimName: "ns-abc123-module-rootdisk",
+		SnapshotName:              "snap-rootdisk",
+		CSIDriver:                 "rook-ceph.rbd.csi.ceph.com",
+		StorageClassName:          "rook-ceph-block",
+		RequestedStorage:          "37Gi",
+	}
+
+	ready, err := vm.EnsureClonePVC(context.Background(), "ns-abc123", state, "ruddervirt-system", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ready {
+		t.Fatal("legitimately bound clone PVC should be ready")
+	}
+	if state.Phase != v1alpha1.CloneVolumePhasePVCBound {
+		t.Errorf("state.Phase = %s, want %s", state.Phase, v1alpha1.CloneVolumePhasePVCBound)
 	}
 }

@@ -22,6 +22,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -247,6 +248,19 @@ func main() {
 		setupLog.Error(err, "Failed to create controller", "controller", "GradeRequest")
 		os.Exit(1)
 	}
+
+	// Background reaper: garbage-collects clone PVCs orphaned by deleted (or
+	// force-deleted) VirtualMachineClones and exposes Pending/orphan metrics, so a
+	// dead-snapshot PVC can never linger or statically adopt an unrelated PV.
+	if err := mgr.Add(&controller.PVCReaper{
+		Client:           mgr.GetClient(),
+		Reader:           mgr.GetAPIReader(),
+		Interval:         envDuration("PVC_REAP_INTERVAL"),
+		PendingThreshold: envDuration("PVC_PENDING_THRESHOLD"),
+	}); err != nil {
+		setupLog.Error(err, "Failed to add PVC reaper")
+		os.Exit(1)
+	}
 	// +kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
@@ -263,4 +277,19 @@ func main() {
 		setupLog.Error(err, "Failed to run manager")
 		os.Exit(1)
 	}
+}
+
+// envDuration parses a Go duration from an environment variable, returning 0 (which
+// callers treat as "use the built-in default") when it is unset or invalid.
+func envDuration(name string) time.Duration {
+	v := os.Getenv(name)
+	if v == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		setupLog.Error(err, "Ignoring invalid duration env var", "name", name, "value", v)
+		return 0
+	}
+	return d
 }

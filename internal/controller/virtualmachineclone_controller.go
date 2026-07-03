@@ -262,6 +262,17 @@ func (r *VirtualMachineCloneReconciler) handleVolumeProvisioning(ctx context.Con
 	cloneNS := vmClone.Status.CloneNamespace
 	cloneID := vmClone.Status.CloneID
 
+	// The per-clone VirtualMachineNamespace CR owns the clone PVCs so they are
+	// garbage-collected with the clone. It lives in the same namespace as the PVCs
+	// (created in handlePending); a missing owner is non-fatal — PVCs still provision.
+	owner := &v1alpha1.VirtualMachineNamespace{}
+	if err := r.Client.Get(ctx, types.NamespacedName{Name: cloneID, Namespace: OperatorNamespace()}, owner); err != nil {
+		if !errors.IsNotFound(err) {
+			return ctrl.Result{}, fmt.Errorf("getting owning VirtualMachineNamespace %s: %w", cloneID, err)
+		}
+		owner = nil
+	}
+
 	allReady := true
 	for i := range vmClone.Status.VolumeStates {
 		state := &vmClone.Status.VolumeStates[i]
@@ -270,8 +281,19 @@ func (r *VirtualMachineCloneReconciler) handleVolumeProvisioning(ctx context.Con
 			continue
 		}
 
-		ready, err := r.volumeManager.EnsureClonePVC(ctx, cloneID, state, cloneNS)
+		ready, err := r.volumeManager.EnsureClonePVC(ctx, cloneID, state, cloneNS, owner)
 		if err != nil {
+			// A dead/terminating snapshot or a PVC that cannot provision is terminal:
+			// fail the clone fast with a clear condition instead of retrying forever.
+			if clone.IsSnapshotUnusable(err) {
+				meta.SetStatusCondition(&vmClone.Status.Conditions, metav1.Condition{
+					Type:    v1alpha1.CloneConditionVolumesReady,
+					Status:  metav1.ConditionFalse,
+					Reason:  "SnapshotUnusable",
+					Message: fmt.Sprintf("volume %s: %v", state.VolumeName, err),
+				})
+				return r.failClone(ctx, vmClone, fmt.Errorf("volume %s: %w", state.VolumeName, err))
+			}
 			return ctrl.Result{}, fmt.Errorf("clone PVC for %s: %w", state.VolumeName, err)
 		}
 		if !ready {

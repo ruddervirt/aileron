@@ -3,6 +3,7 @@ package clone
 import (
 	"context"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"os"
 	"strings"
@@ -22,6 +23,21 @@ import (
 )
 
 const EFIVarsVolumeName = "efivars"
+
+// pendingPVCThreshold bounds how long a clone PVC may sit Pending with a healthy
+// snapshot before the clone is failed instead of retried forever.
+const pendingPVCThreshold = 5 * time.Minute
+
+// ErrSnapshotUnusable marks a terminal clone-volume provisioning failure: the
+// VolumeSnapshot data source is missing or being deleted, or the PVC cannot
+// provision (stuck Pending). The reconciler fails the clone fast on this error
+// instead of leaving a PVC to spin forever.
+var ErrSnapshotUnusable = stderrors.New("clone volume cannot be provisioned")
+
+// IsSnapshotUnusable reports whether err (or anything it wraps) is ErrSnapshotUnusable.
+func IsSnapshotUnusable(err error) bool {
+	return stderrors.Is(err, ErrSnapshotUnusable)
+}
 
 // VolumeManager handles volume provisioning for clone operations.
 type VolumeManager struct {
@@ -62,8 +78,14 @@ func templateVMShortName(vm *unstructured.Unstructured) string {
 
 // EnsureClonePVC creates a PVC from a snapshot directly in the clone namespace.
 // Since template and clone share the same namespace, no cross-namespace PV
-// transfer is needed.
-func (v *VolumeManager) EnsureClonePVC(ctx context.Context, cloneID string, state *v1alpha1.CloneVolumeStatus, cloneNamespace string) (bool, error) {
+// transfer is needed. owner is the clone's VirtualMachineNamespace CR, set as the
+// PVC's controller owner so deleting the clone root garbage-collects its storage.
+//
+// The snapshot data source is validated before the PVC is created and re-checked
+// while the PVC stays Pending: a missing or terminating snapshot (or a PVC that
+// cannot provision) returns ErrSnapshotUnusable so the clone fails fast instead of
+// emitting a perpetually-Pending PVC.
+func (v *VolumeManager) EnsureClonePVC(ctx context.Context, cloneID string, state *v1alpha1.CloneVolumeStatus, cloneNamespace string, owner *v1alpha1.VirtualMachineNamespace) (bool, error) {
 	logger := log.FromContext(ctx)
 
 	if state.PersistentVolumeClaimName == "" {
@@ -80,14 +102,25 @@ func (v *VolumeManager) EnsureClonePVC(ctx context.Context, cloneID string, stat
 	existing := &corev1.PersistentVolumeClaim{}
 	err := v.Client.Get(ctx, types.NamespacedName{Name: pvcName, Namespace: cloneNamespace}, existing)
 	if err == nil {
-		if existing.Status.Phase == corev1.ClaimBound {
-			state.Phase = v1alpha1.CloneVolumePhasePVCBound
-			return true, nil
-		}
-		return false, nil
+		return v.reconcileExistingClonePVC(ctx, state, cloneNamespace, existing)
 	}
 	if !errors.IsNotFound(err) {
 		return false, fmt.Errorf("checking clone PVC %s: %w", pvcName, err)
+	}
+
+	// PVC does not exist yet. Validate the snapshot source before creating a PVC
+	// that could only ever spin against a dead/terminating snapshot.
+	_, ready, terminal, err := snapshotRestoreState(ctx, v.Client, state.SnapshotName, cloneNamespace)
+	if err != nil {
+		return false, fmt.Errorf("validating snapshot %s: %w", state.SnapshotName, err)
+	}
+	if terminal {
+		return false, fmt.Errorf("%w: snapshot %q for volume %s is missing or being deleted",
+			ErrSnapshotUnusable, state.SnapshotName, state.VolumeName)
+	}
+	if !ready {
+		// Snapshot exists but has not finished readying — requeue, do not create yet.
+		return false, nil
 	}
 
 	storageReq := state.RequestedStorage
@@ -125,6 +158,13 @@ func (v *VolumeManager) EnsureClonePVC(ctx context.Context, cloneID string, stat
 	if state.StorageClassName != "" {
 		pvc.Spec.StorageClassName = &state.StorageClassName
 	}
+	// Own the PVC by the clone's VirtualMachineNamespace CR (same namespace as the
+	// PVC), so k8s garbage-collects it with the clone root. A reference to the
+	// VirtualMachineClone CR could be cross-namespace, which GC treats as an absent
+	// owner and would delete the PVC immediately — so we deliberately do not use it.
+	if ref := vmnsOwnerReference(owner); ref != nil {
+		pvc.OwnerReferences = []metav1.OwnerReference{*ref}
+	}
 
 	if err := v.Client.Create(ctx, pvc); err != nil {
 		if errors.IsAlreadyExists(err) {
@@ -135,6 +175,103 @@ func (v *VolumeManager) EnsureClonePVC(ctx context.Context, cloneID string, stat
 
 	logger.Info("Created clone PVC from snapshot", "pvc", pvcName, "snapshot", state.SnapshotName)
 	return false, nil
+}
+
+// reconcileExistingClonePVC inspects a clone PVC that already exists. A Bound PVC is
+// verified to sit on aileron-provisioned storage (guarding against a stray Available
+// PV being statically adopted). A still-Pending PVC is checked against its snapshot
+// source and its age so it can never spin forever.
+func (v *VolumeManager) reconcileExistingClonePVC(ctx context.Context, state *v1alpha1.CloneVolumeStatus, cloneNamespace string, pvc *corev1.PersistentVolumeClaim) (bool, error) {
+	logger := log.FromContext(ctx)
+
+	if pvc.Status.Phase == corev1.ClaimBound {
+		foreign, err := v.boundToForeignPV(ctx, state, pvc)
+		if err != nil {
+			return false, err
+		}
+		if foreign {
+			// The PVC statically adopted a PV that aileron did not provision — the
+			// snapshot dataSource was silently dropped, so it holds wrong/empty data
+			// and hijacks unrelated storage. Delete the PVC to release that PV; it
+			// becomes Released (not Available), so it will not be re-adopted, and
+			// dynamic provisioning from the snapshot proceeds on the next create.
+			logger.Info("Clone PVC bound to a foreign PV; releasing and recreating",
+				"pvc", pvc.Name, "pv", pvc.Spec.VolumeName, "expectedDriver", state.CSIDriver)
+			if err := v.Client.Delete(ctx, pvc); err != nil && !errors.IsNotFound(err) {
+				return false, fmt.Errorf("deleting mis-bound clone PVC %s: %w", pvc.Name, err)
+			}
+			return false, nil
+		}
+		state.Phase = v1alpha1.CloneVolumePhasePVCBound
+		return true, nil
+	}
+
+	// Still Pending. If the snapshot source has since gone or started terminating,
+	// fail fast rather than let the PVC retry provisioning forever.
+	_, _, terminal, err := snapshotRestoreState(ctx, v.Client, state.SnapshotName, cloneNamespace)
+	if err != nil {
+		return false, fmt.Errorf("validating snapshot %s: %w", state.SnapshotName, err)
+	}
+	if terminal {
+		return false, fmt.Errorf("%w: snapshot %q for volume %s is missing or being deleted",
+			ErrSnapshotUnusable, state.SnapshotName, state.VolumeName)
+	}
+
+	// Snapshot looks healthy but the PVC has been Pending too long — provisioning is
+	// stuck. Surface it as a clone failure instead of an indefinite Pending PVC.
+	if !pvc.CreationTimestamp.IsZero() && time.Since(pvc.CreationTimestamp.Time) > pendingPVCThreshold {
+		return false, fmt.Errorf("%w: PVC %s for volume %s has been Pending for over %s",
+			ErrSnapshotUnusable, pvc.Name, state.VolumeName, pendingPVCThreshold)
+	}
+
+	return false, nil
+}
+
+// boundToForeignPV reports whether a Bound clone PVC sits on a PV that aileron did
+// not dynamically provision from the expected CSI driver. Such a PV was statically
+// adopted (a stray Available PV picked up because static binding beats dynamic
+// provisioning and capacity match is >=, not =).
+func (v *VolumeManager) boundToForeignPV(ctx context.Context, state *v1alpha1.CloneVolumeStatus, pvc *corev1.PersistentVolumeClaim) (bool, error) {
+	// Without an expected driver or a bound PV name we cannot judge — treat as legit.
+	if state.CSIDriver == "" || pvc.Spec.VolumeName == "" {
+		return false, nil
+	}
+	pv := &corev1.PersistentVolume{}
+	if err := v.Client.Get(ctx, types.NamespacedName{Name: pvc.Spec.VolumeName}, pv); err != nil {
+		if errors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("getting bound PV %s: %w", pvc.Spec.VolumeName, err)
+	}
+	// A PV dynamically provisioned by the CSI driver carries a CSI source with that
+	// driver (and the pv.kubernetes.io/provisioned-by annotation). A foreign PV
+	// (hostPath/NFS/a different CSI/a hand-made volume from another app) won't match.
+	if pv.Spec.CSI != nil && pv.Spec.CSI.Driver == state.CSIDriver {
+		return false, nil
+	}
+	if pv.Annotations["pv.kubernetes.io/provisioned-by"] == state.CSIDriver {
+		return false, nil
+	}
+	return true, nil
+}
+
+// vmnsOwnerReference builds a controller owner reference to the clone's
+// VirtualMachineNamespace CR. Returns nil when the owner is absent or has no UID
+// (nothing to own to) so PVC creation still proceeds.
+func vmnsOwnerReference(owner *v1alpha1.VirtualMachineNamespace) *metav1.OwnerReference {
+	if owner == nil || owner.UID == "" {
+		return nil
+	}
+	controller := true
+	blockOwnerDeletion := true
+	return &metav1.OwnerReference{
+		APIVersion:         v1alpha1.GroupVersion.String(),
+		Kind:               "VirtualMachineNamespace",
+		Name:               owner.Name,
+		UID:                owner.UID,
+		Controller:         &controller,
+		BlockOwnerDeletion: &blockOwnerDeletion,
+	}
 }
 
 // RewireVMVolumes updates a cloned VM's volume references from DataVolume to PVC.
