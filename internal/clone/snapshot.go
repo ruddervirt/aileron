@@ -25,6 +25,9 @@ const snapshotClassCacheDuration = 5 * time.Minute
 // already honors in internal/kubevirt/featuregates.go.
 const defaultSnapshotClassAnnotation = "snapshot.storage.k8s.io/is-default-class"
 
+// annotationTrue is the value a boolean opt-in annotation carries when enabled.
+const annotationTrue = "true"
+
 var volumeSnapshotGVK = schema.GroupVersionKind{
 	Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshot",
 }
@@ -472,8 +475,8 @@ func (s *SnapshotManager) resolveSnapshotClass(ctx context.Context, csiDriver st
 		anns := item.GetAnnotations()
 		candidates = append(candidates, snapClassInfo{
 			name:          item.GetName(),
-			aileronMarked: anns[AnnotationSnapshotClass] == "true",
-			isDefault:     anns[defaultSnapshotClassAnnotation] == "true",
+			aileronMarked: anns[AnnotationSnapshotClass] == annotationTrue,
+			isDefault:     anns[defaultSnapshotClassAnnotation] == annotationTrue,
 		})
 	}
 
