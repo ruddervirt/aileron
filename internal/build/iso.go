@@ -18,6 +18,11 @@ var dvGVK = schema.GroupVersionKind{
 	Group: "cdi.kubevirt.io", Version: "v1beta1", Kind: "DataVolume",
 }
 
+// DefaultISOCacheTTL is how long an unused — or never-completed — cached ISO
+// survives before the cleanup paths reap it. Builds may override it via
+// spec.isoCacheTTL; the periodic reaper always uses the default.
+const DefaultISOCacheTTL = 24 * time.Hour
+
 // ISOImporter handles importing ISO images as cached DataVolumes in the operator
 // namespace, then cloning them into per-build namespaces.
 type ISOImporter struct {
@@ -109,7 +114,7 @@ func (iso *ISOImporter) ensureCloneDV(ctx context.Context, build *v1alpha1.Virtu
 		LabelBuild:                build.Name,
 		LabelBuildNamespace:       build.Namespace,
 		LabelVM:                   vmSpec.Name,
-		"ruddervirt.io/iso-clone": "true",
+		"ruddervirt.io/iso-clone": valueTrue,
 	})
 	dv.Object["spec"] = map[string]any{
 		"storage": map[string]any{
@@ -186,7 +191,7 @@ func (iso *ISOImporter) buildISODataVolume(namespace, name string, isoSpec *v1al
 	dv.SetName(name)
 	dv.SetNamespace(namespace)
 	dv.SetLabels(map[string]string{
-		"ruddervirt.io/iso-cache":     "true",
+		"ruddervirt.io/iso-cache":     valueTrue,
 		"ruddervirt.io/iso-cache-key": cacheKey[:16],
 	})
 	dv.SetAnnotations(map[string]string{
@@ -216,6 +221,7 @@ func (iso *ISOImporter) buildISODataVolume(namespace, name string, isoSpec *v1al
 
 // CleanupExpiredISOs deletes cached ISO DataVolumes that haven't been used within the TTL.
 func (iso *ISOImporter) CleanupExpiredISOs(ctx context.Context, namespace string, ttl time.Duration) error {
+	logger := log.FromContext(ctx)
 	list := &unstructured.UnstructuredList{}
 	list.SetGroupVersionKind(schema.GroupVersionKind{
 		Group: "cdi.kubevirt.io", Version: "v1beta1", Kind: "DataVolumeList",
@@ -223,7 +229,7 @@ func (iso *ISOImporter) CleanupExpiredISOs(ctx context.Context, namespace string
 
 	if err := iso.Client.List(ctx, list,
 		client.InNamespace(namespace),
-		client.MatchingLabels{"ruddervirt.io/iso-cache": "true"},
+		client.MatchingLabels{"ruddervirt.io/iso-cache": valueTrue},
 	); err != nil {
 		return fmt.Errorf("listing cached ISOs: %w", err)
 	}
@@ -231,7 +237,7 @@ func (iso *ISOImporter) CleanupExpiredISOs(ctx context.Context, namespace string
 	for i := range list.Items {
 		dv := &list.Items[i]
 		// Skip clone DVs — only clean up source cache DVs.
-		if dv.GetLabels()["ruddervirt.io/iso-clone"] == "true" {
+		if dv.GetLabels()["ruddervirt.io/iso-clone"] == valueTrue {
 			continue
 		}
 		annotations := dv.GetAnnotations()
@@ -243,16 +249,46 @@ func (iso *ISOImporter) CleanupExpiredISOs(ctx context.Context, namespace string
 		if err != nil {
 			continue
 		}
-		if time.Since(lastUsed) > ttl {
-			// Only delete if import is complete (don't delete mid-import DVs).
-			phase, _, _ := unstructured.NestedString(dv.Object, "status", "phase")
-			if phase == PhaseSucceeded || phase == PhaseFailed {
-				if err := iso.Client.Delete(ctx, dv); err != nil && !errors.IsNotFound(err) {
-					return fmt.Errorf("deleting expired ISO %s: %w", dv.GetName(), err)
-				}
-			}
+		if time.Since(lastUsed) <= ttl {
+			continue
+		}
+		phase, _, _ := unstructured.NestedString(dv.Object, "status", "phase")
+		// Reap completed imports past their TTL — and STALLED ones. CDI holds
+		// retryable importer errors (dead URL → 404, unreachable mirror) in a
+		// non-terminal phase forever: the importer pod crashloops and the DV
+		// never reaches Succeeded or Failed, so a completed-phase gate alone
+		// leaks the DV, its prime PVC, and a perpetually-restarting importer
+		// pod. last-used is only refreshed on Succeeded, so for a
+		// never-completed DV "expired" means it has been stuck for the whole
+		// TTL. An actively-progressing import (Running=True) is never reaped.
+		stalled := phase != PhaseSucceeded && phase != PhaseFailed && importStalled(dv)
+		if phase != PhaseSucceeded && phase != PhaseFailed && !stalled {
+			continue
+		}
+		if stalled {
+			logger.Info("Reaping stalled ISO cache import",
+				"dv", dv.GetName(), "phase", phase,
+				"url", annotations["ruddervirt.io/iso-url"])
+		}
+		if err := iso.Client.Delete(ctx, dv); err != nil && !errors.IsNotFound(err) {
+			return fmt.Errorf("deleting expired ISO %s: %w", dv.GetName(), err)
 		}
 	}
 
 	return nil
+}
+
+// importStalled reports whether a DataVolume's import has stopped making
+// progress: its Running condition is False with reason Error (the condition
+// CDI sets while it retries a failing importer indefinitely).
+func importStalled(dv *unstructured.Unstructured) bool {
+	conditions, _, _ := unstructured.NestedSlice(dv.Object, "status", "conditions")
+	for _, item := range conditions {
+		cond, ok := item.(map[string]any)
+		if !ok || cond["type"] != "Running" {
+			continue
+		}
+		return cond["status"] == "False" && cond["reason"] == "Error"
+	}
+	return false
 }

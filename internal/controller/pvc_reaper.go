@@ -24,6 +24,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	v1alpha1 "github.com/ruddervirt/aileron/api/v1alpha1"
+	"github.com/ruddervirt/aileron/internal/build"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -70,7 +71,9 @@ func init() {
 // finalizer sweep), its clone PVCs are orphaned; nothing else garbage-collects them,
 // and a Pending orphan can even statically adopt an unrelated Available PV. The
 // reaper periodically deletes clone PVCs whose owning clone is gone and which no
-// live VM uses, and exposes metrics for Pending/orphaned PVCs.
+// live VM uses, and exposes metrics for Pending/orphaned PVCs. It also sweeps
+// expired/stalled cached ISO DataVolumes (see ISOImporter.CleanupExpiredISOs) so a
+// dead-URL import can't crashloop indefinitely between builds.
 type PVCReaper struct {
 	// Client issues deletes.
 	Client client.Client
@@ -191,6 +194,17 @@ func (r *PVCReaper) sweep(ctx context.Context) error {
 
 	pendingClonePVCs.Set(float64(pending))
 	orphanedClonePVCs.Set(float64(orphaned))
+
+	// Also reap expired and stalled ISO caches. This is the periodic backstop:
+	// the build controller only runs ISO cleanup when some build reaches a
+	// terminal phase, so without it a dead-URL import (crashlooping importer
+	// pod + prime PVC) lingers until the next build finishes — or forever on
+	// a quiet cluster. Best-effort: an ISO sweep failure must not stop the
+	// clone-PVC sweep below.
+	isoImporter := &build.ISOImporter{Client: r.Client, OperatorNS: ns}
+	if err := isoImporter.CleanupExpiredISOs(ctx, ns, build.DefaultISOCacheTTL); err != nil {
+		logger.Error(err, "ISO cache sweep failed")
+	}
 
 	// Clean up orphaned clone VirtualMachineNamespace roots, but only once no clone
 	// PVCs remain for that ID (so deleting the VMNS never cascade-deletes an owned

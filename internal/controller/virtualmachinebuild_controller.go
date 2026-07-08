@@ -296,7 +296,7 @@ func (r *VirtualMachineBuildReconciler) Reconcile(ctx context.Context, req ctrl.
 	if build.IsTerminal(vmBuild.Status.Phase) {
 		// Best-effort cleanup of expired cached ISOs.
 		isoImporter := &build.ISOImporter{Client: r.Client, OperatorNS: OperatorNamespace()}
-		ttl := 24 * time.Hour
+		ttl := build.DefaultISOCacheTTL
 		if vmBuild.Spec.ISOCacheTTL != nil {
 			ttl = vmBuild.Spec.ISOCacheTTL.Duration
 		}
