@@ -30,6 +30,13 @@ const (
 	// build.LabelBuildID to avoid the build → clone import cycle.
 	LabelBuildID = "ruddervirt.io/build-id"
 
+	// AnnotationSnapshotClass, set to "true" on a VolumeSnapshotClass, marks it
+	// as aileron's preferred class for its CSI driver. It takes precedence over
+	// the cluster-wide snapshot.storage.k8s.io/is-default-class annotation,
+	// letting an operator steer clone snapshots to a specific class without
+	// changing cluster defaults. See resolveSnapshotClass.
+	AnnotationSnapshotClass = "ruddervirt.io/snapshot-class"
+
 	// templateNADPlaceholder is the namespace placeholder used in template VM
 	// multus network references. The clone controller replaces this with the
 	// actual clone namespace and resource names.

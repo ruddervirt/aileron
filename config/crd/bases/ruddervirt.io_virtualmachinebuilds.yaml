@@ -110,6 +110,13 @@ spec:
                             the base list is still what gets captured into the template and
                             inherited by clones. Use this to attach build-only NICs (e.g., a
                             provisioning subnet with internet) without leaking them downstream.
+                            For an override NIC whose name matches a base-spec NIC, the identity
+                            fields mac, slot, and model are taken from the base NIC (when set
+                            there) and any conflicting override values are ignored: guest OS
+                            state binds to NIC identity (e.g., Windows keys DHCP reservations
+                            and leases to the MAC), and clones boot with the base values, so a
+                            build that ran with different identity would bake guest state no
+                            clone could ever match.
                           items:
                             description: VMNIC defines a NIC assignment for a VM,
                               connecting it to a subnet.

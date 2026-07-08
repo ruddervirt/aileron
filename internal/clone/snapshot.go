@@ -3,6 +3,7 @@ package clone
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -19,34 +20,47 @@ import (
 
 const snapshotClassCacheDuration = 5 * time.Minute
 
+// defaultSnapshotClassAnnotation marks a VolumeSnapshotClass as the cluster
+// default for its CSI driver, mirroring the storage-class convention aileron
+// already honors in internal/kubevirt/featuregates.go.
+const defaultSnapshotClassAnnotation = "snapshot.storage.k8s.io/is-default-class"
+
 var volumeSnapshotGVK = schema.GroupVersionKind{
 	Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshot",
+}
+
+// snapshotClassResult is the cached outcome of resolving a CSI driver to a
+// VolumeSnapshotClass: the chosen class name plus a warning that is non-empty
+// when the choice was ambiguous (several classes matched and none was marked).
+type snapshotClassResult struct {
+	name    string
+	warning string
 }
 
 // SnapshotClassCache caches VolumeSnapshotClass lookups to reduce API calls.
 type SnapshotClassCache struct {
 	mu        sync.RWMutex
-	classes   map[string]string // CSI driver -> snapshot class name
+	classes   map[string]snapshotClassResult // CSI driver -> resolved class
 	expiresAt time.Time
 }
 
-func (c *SnapshotClassCache) Get(csiDriver string) (string, bool) {
+func (c *SnapshotClassCache) Get(csiDriver string) (snapshotClassResult, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	if time.Now().After(c.expiresAt) {
-		return "", false
+		return snapshotClassResult{}, false
 	}
-	class, ok := c.classes[csiDriver]
-	return class, ok
+	res, ok := c.classes[csiDriver]
+	return res, ok
 }
 
-func (c *SnapshotClassCache) Set(csiDriver, className string) {
+func (c *SnapshotClassCache) Set(csiDriver string, res snapshotClassResult) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.classes == nil {
-		c.classes = make(map[string]string)
+		c.classes = make(map[string]snapshotClassResult)
 	}
-	c.classes[csiDriver] = className
+	c.classes[csiDriver] = res
 	c.expiresAt = time.Now().Add(snapshotClassCacheDuration)
 }
 
@@ -239,11 +253,15 @@ func (s *SnapshotManager) EnsureBaseSnapshotReady(ctx context.Context, cloneName
 
 	// Create a new snapshot if none exists.
 	if state.SnapshotName == "" {
-		snapshotClass, err := s.resolveSnapshotClass(ctx, state.CSIDriver)
+		snapshotClass, warning, err := s.resolveSnapshotClass(ctx, state.CSIDriver)
 		if err != nil {
 			return false, fmt.Errorf("resolving snapshot class for %s: %w", state.CSIDriver, err)
 		}
 		state.SnapshotClassName = snapshotClass
+		if warning != "" {
+			logger.Info(warning, "volume", state.VolumeName, "csiDriver", state.CSIDriver, "snapshotClass", snapshotClass)
+			state.Message = warning
+		}
 
 		snapshotName := fmt.Sprintf("%s-%s-snap", state.SourcePVCName, cloneName)
 		if len(snapshotName) > 63 {
@@ -375,9 +393,65 @@ func (s *SnapshotManager) findReusableSnapshot(ctx context.Context, state *v1alp
 	return "", nil
 }
 
-func (s *SnapshotManager) resolveSnapshotClass(ctx context.Context, csiDriver string) (string, error) {
-	if className, ok := s.ClassCache.Get(csiDriver); ok {
-		return className, nil
+// snapClassInfo is the subset of a VolumeSnapshotClass that selectSnapshotClass
+// needs to make a choice among classes that all share the target CSI driver.
+type snapClassInfo struct {
+	name          string
+	aileronMarked bool // AnnotationSnapshotClass == "true"
+	isDefault     bool // defaultSnapshotClassAnnotation == "true"
+}
+
+// selectSnapshotClass picks one class name among candidates that all share the
+// target CSI driver, applying aileron's precedence:
+//  1. exactly one candidate -> use it;
+//  2. classes marked with AnnotationSnapshotClass (aileron opt-in);
+//  3. else classes marked with defaultSnapshotClassAnnotation (k8s default);
+//  4. else all candidates.
+//
+// Within the first non-empty tier the names are sorted and the first is
+// returned. ambiguous is true when the winning tier still held more than one
+// candidate, so the caller can surface a warning. An empty slice returns "".
+func selectSnapshotClass(candidates []snapClassInfo) (name string, ambiguous bool) {
+	if len(candidates) == 0 {
+		return "", false
+	}
+	if len(candidates) == 1 {
+		return candidates[0].name, false
+	}
+
+	tier := filterSnapClasses(candidates, func(c snapClassInfo) bool { return c.aileronMarked })
+	if len(tier) == 0 {
+		tier = filterSnapClasses(candidates, func(c snapClassInfo) bool { return c.isDefault })
+	}
+	if len(tier) == 0 {
+		tier = candidates
+	}
+
+	names := make([]string, len(tier))
+	for i, c := range tier {
+		names[i] = c.name
+	}
+	sort.Strings(names)
+	return names[0], len(tier) > 1
+}
+
+func filterSnapClasses(in []snapClassInfo, keep func(snapClassInfo) bool) []snapClassInfo {
+	var out []snapClassInfo
+	for _, c := range in {
+		if keep(c) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// resolveSnapshotClass resolves a CSI driver to a VolumeSnapshotClass name. The
+// returned warning is non-empty when the choice was ambiguous (several classes
+// matched the driver and none was marked); the clone still proceeds with the
+// deterministic pick.
+func (s *SnapshotManager) resolveSnapshotClass(ctx context.Context, csiDriver string) (string, string, error) {
+	if res, ok := s.ClassCache.Get(csiDriver); ok {
+		return res.name, res.warning, nil
 	}
 
 	list := &unstructured.UnstructuredList{}
@@ -386,17 +460,39 @@ func (s *SnapshotManager) resolveSnapshotClass(ctx context.Context, csiDriver st
 	})
 
 	if err := s.Client.List(ctx, list); err != nil {
-		return "", fmt.Errorf("listing VolumeSnapshotClasses: %w", err)
+		return "", "", fmt.Errorf("listing VolumeSnapshotClasses: %w", err)
 	}
 
+	var candidates []snapClassInfo
 	for _, item := range list.Items {
 		driver, _, _ := unstructured.NestedString(item.Object, "driver")
-		if driver == csiDriver {
-			name := item.GetName()
-			s.ClassCache.Set(csiDriver, name)
-			return name, nil
+		if driver != csiDriver {
+			continue
 		}
+		anns := item.GetAnnotations()
+		candidates = append(candidates, snapClassInfo{
+			name:          item.GetName(),
+			aileronMarked: anns[AnnotationSnapshotClass] == "true",
+			isDefault:     anns[defaultSnapshotClassAnnotation] == "true",
+		})
 	}
 
-	return "", fmt.Errorf("no VolumeSnapshotClass found for CSI driver %s", csiDriver)
+	if len(candidates) == 0 {
+		return "", "", fmt.Errorf("no VolumeSnapshotClass found for CSI driver %s", csiDriver)
+	}
+
+	name, ambiguous := selectSnapshotClass(candidates)
+	warning := ""
+	if ambiguous {
+		names := make([]string, len(candidates))
+		for i, c := range candidates {
+			names[i] = c.name
+		}
+		sort.Strings(names)
+		warning = fmt.Sprintf("ambiguous VolumeSnapshotClass for CSI driver %s: candidates %v; using %s — mark one with %s=true to disambiguate",
+			csiDriver, names, name, AnnotationSnapshotClass)
+	}
+
+	s.ClassCache.Set(csiDriver, snapshotClassResult{name: name, warning: warning})
+	return name, warning, nil
 }
