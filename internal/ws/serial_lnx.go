@@ -47,6 +47,7 @@ func RunCommandsWithRudderGradeLinux(wsConn *websocket.Conn, username, password,
 		if err == nil {
 			err = fmt.Errorf("unknown error")
 		}
+		err = annotateOSMismatch(err, string(scroll.snapshot()), "linux")
 		slog.Error("linux serial interaction failed", "error", err)
 		scroll.dumpToLogger()
 		return nil, err

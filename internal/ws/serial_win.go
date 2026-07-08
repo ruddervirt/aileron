@@ -56,6 +56,7 @@ func RunCommandsWithRudderGrade(wsConn *websocket.Conn, username, password, doma
 		if err == nil {
 			err = fmt.Errorf("unknown error")
 		}
+		err = annotateOSMismatch(err, string(scroll.snapshot()), "windows")
 		slog.Error("serial console interaction failed", "error", err)
 		scroll.dumpToLogger()
 		return nil, err
