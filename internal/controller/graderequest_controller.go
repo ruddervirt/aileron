@@ -26,8 +26,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -50,17 +53,18 @@ import (
 )
 
 const (
-	gradeDefaultResyncPeriod = 3 * time.Second
-	gradeRequeueBackoff      = 1 * time.Second
-	gradeJobActiveDeadline   = int64(300) // 5 minutes
-	gradeJobBackoffLimit     = int32(0)   // no retries
-	gradeCompletedRetention  = 5 * time.Minute
-	gradeBootWaitDefault     = 90 * time.Second // guest-boot grace after auto power-on
-	gradeBootTimeout         = 5 * time.Minute  // auto-started VM must reach Running within this
-	gradeMaxConcurrentReconc = 10
-	gradeVMIPhaseRunning     = "Running"
-	gradeServiceAccountName  = "grader"
-	gradeDefaultGraderImage  = "ghcr.io/ruddervirt/aileron/grader:latest"
+	gradeDefaultResyncPeriod  = 3 * time.Second
+	gradeRequeueBackoff       = 1 * time.Second
+	gradeJobActiveDeadline    = int64(300) // 5 minutes
+	gradeJobBackoffLimit      = int32(0)   // no retries
+	gradeCompletedRetention   = 5 * time.Minute
+	gradeBootWaitDefault      = 90 * time.Second // guest-boot grace after auto power-on
+	gradeBootTimeout          = 5 * time.Minute  // auto-started VM must reach Running within this
+	gradeMaxConcurrentReconc  = 10
+	gradeDefaultMaxConcurrent = int32(10) // default grading concurrency cap when GRADE_MAX_CONCURRENT is unset
+	gradeVMIPhaseRunning      = "Running"
+	gradeServiceAccountName   = "grader"
+	gradeDefaultGraderImage   = "ghcr.io/ruddervirt/aileron/grader:latest"
 )
 
 // errGradeRequeue signals that a grade request needs a fast re-reconcile
@@ -102,6 +106,22 @@ func gradeBootWaitDuration() time.Duration {
 	return gradeBootWaitDefault
 }
 
+// gradeMaxConcurrent is the maximum number of grading concurrency slots allowed
+// cluster-wide (a slot is any VM booting-for-grade or running a grade job).
+// Overridable via GRADE_MAX_CONCURRENT: a positive value caps concurrency, an
+// explicit 0 disables the cap (unlimited fan-boot), and unset/invalid falls
+// back to gradeDefaultMaxConcurrent so a missing config still throttles.
+func gradeMaxConcurrent() int32 {
+	v := os.Getenv("GRADE_MAX_CONCURRENT")
+	if v == "" {
+		return gradeDefaultMaxConcurrent
+	}
+	if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+		return int32(n)
+	}
+	return gradeDefaultMaxConcurrent
+}
+
 // GradeRequestReconciler reconciles a GradeRequest object. It schedules a
 // per-VM grading Job, drives the VM power state, and records the results.
 type GradeRequestReconciler struct {
@@ -115,6 +135,23 @@ type GradeRequestReconciler struct {
 	// Clientset drives Jobs and streams grader pod logs (logs are not exposed
 	// through the controller-runtime client).
 	Clientset kubernetes.Interface
+	// Reader is an uncached client used by the concurrency gate to count
+	// in-flight grading slots across all GradeRequests. The cached client is
+	// unsafe there: a just-committed status write from a concurrent reconcile
+	// may not be in the informer cache yet, which would overshoot the limit.
+	Reader client.Reader
+
+	// admissionMu serializes the concurrency gate (count in-flight slots ->
+	// decide -> power on / create job -> write status) so two reconciles cannot
+	// both admit into the same free slot. A process mutex is sufficient because
+	// the operator runs a single leader-elected instance.
+	admissionMu sync.Mutex
+
+	// powerOn / powerOff are seams over the KubeVirt start/stop subresource so
+	// tests can drive the power state without a live subresource endpoint.
+	// Both default to kubevirtSubresourceAction when nil.
+	powerOn  func(ctx context.Context, namespace, vmName string) error
+	powerOff func(ctx context.Context, namespace, vmName string) error
 }
 
 // +kubebuilder:rbac:groups=ruddervirt.io,resources=graderequests,verbs=get;list;watch;create;update;patch;delete
@@ -283,11 +320,40 @@ func (r *GradeRequestReconciler) vmiPhase(ctx context.Context, namespace, vmName
 }
 
 func (r *GradeRequestReconciler) powerOnVM(ctx context.Context, namespace, vmName string) error {
+	if r.powerOn != nil {
+		return r.powerOn(ctx, namespace, vmName)
+	}
 	return r.kubevirtSubresourceAction(ctx, namespace, vmName, "start")
 }
 
 func (r *GradeRequestReconciler) powerOffVM(ctx context.Context, namespace, vmName string) error {
+	if r.powerOff != nil {
+		return r.powerOff(ctx, namespace, vmName)
+	}
 	return r.kubevirtSubresourceAction(ctx, namespace, vmName, "stop")
+}
+
+// gradeSlotOccupied reports whether a VM is consuming a grading concurrency
+// slot: it has a running grade job, or it has been powered on for grading and
+// is still booting/waiting. Terminal (Ready/Failed) VMs free their slot even
+// before the post-grade power-off cleanup completes.
+func gradeSlotOccupied(vs v1alpha1.GradeVMStatus) bool {
+	switch vs.Phase {
+	case v1alpha1.GradeRequestPhaseRunning:
+		return true
+	case v1alpha1.GradeRequestPhaseReady, v1alpha1.GradeRequestPhaseFailed:
+		return false
+	default: // Pending / unset
+		return vs.BootStartedAt != nil && !vs.PoweredOff
+	}
+}
+
+// gradeVMWaiting reports whether a VM still needs admission through the
+// concurrency gate: it is Pending, has not been powered on for grading, and has
+// no grade job yet. Such a VM occupies no slot until it is admitted.
+func gradeVMWaiting(vs v1alpha1.GradeVMStatus) bool {
+	return vs.Phase == v1alpha1.GradeRequestPhasePending &&
+		vs.BootStartedAt == nil && vs.JobName == ""
 }
 
 // kubevirtSubresourceAction calls PUT on
@@ -318,8 +384,98 @@ func (r *GradeRequestReconciler) kubevirtSubresourceAction(ctx context.Context, 
 	return nil
 }
 
+// computeGradeAdmission runs the strict-FIFO concurrency gate for one reconcile
+// pass. It counts grading slots occupied across every GradeRequest and orders
+// the globally-waiting VMs by (creation time, request name, VM index). Callers
+// must hold r.admissionMu and pass limit > 0.
+//
+// It returns, for the request being reconciled: the set of its VM indices
+// cleared to be admitted this pass, the 1-based global queue position of each
+// of its still-queued VMs, the global occupied-slot count, and the global
+// waiting-queue length.
+func (r *GradeRequestReconciler) computeGradeAdmission(ctx context.Context, gr *v1alpha1.GradeRequest, limit int32) (admit map[int]bool, positions map[int]int32, occupied, waitingTotal int32, err error) {
+	var list v1alpha1.GradeRequestList
+	if err = r.Reader.List(ctx, &list, client.InNamespace(gr.Namespace)); err != nil {
+		return nil, nil, 0, 0, fmt.Errorf("list grade requests for admission: %w", err)
+	}
+
+	type waitEntry struct {
+		created time.Time
+		name    string
+		vmIndex int
+		selfIdx int // index into gr.Spec.VMs, or -1 for another request's VM
+	}
+	var waiting []waitEntry
+
+	classify := func(created time.Time, name string, vms []v1alpha1.GradeVM, statuses []v1alpha1.GradeVMStatus, self bool) {
+		byName := make(map[string]v1alpha1.GradeVMStatus, len(statuses))
+		for _, vs := range statuses {
+			byName[vs.Name] = vs
+		}
+		for vi := range vms {
+			vs, ok := byName[vms[vi].Name]
+			switch {
+			case ok && gradeSlotOccupied(vs):
+				occupied++
+			case ok && (vs.Phase == v1alpha1.GradeRequestPhaseReady || vs.Phase == v1alpha1.GradeRequestPhaseFailed):
+				// Terminal: neither occupied nor waiting.
+			default:
+				// Waiting: no status yet, or Pending and not yet powered on.
+				e := waitEntry{created: created, name: name, vmIndex: vi, selfIdx: -1}
+				if self {
+					e.selfIdx = vi
+				}
+				waiting = append(waiting, e)
+			}
+		}
+	}
+
+	// Count the request being reconciled from its in-memory (freshest) state,
+	// and every other request from the uncached list. Skipping self in the loop
+	// keeps it counted exactly once regardless of list contents.
+	classify(gr.CreationTimestamp.Time, gr.Name, gr.Spec.VMs, gr.Status.VMStatuses, true)
+	for i := range list.Items {
+		o := &list.Items[i]
+		if o.Name == gr.Name && o.Namespace == gr.Namespace {
+			continue
+		}
+		normalizeGradeSpec(&o.Spec)
+		gradable, reason := filterGradableVMs(o.Spec.VMs)
+		if reason != "" {
+			continue
+		}
+		classify(o.CreationTimestamp.Time, o.Name, gradable, o.Status.VMStatuses, false)
+	}
+
+	sort.SliceStable(waiting, func(a, b int) bool {
+		if !waiting[a].created.Equal(waiting[b].created) {
+			return waiting[a].created.Before(waiting[b].created)
+		}
+		if waiting[a].name != waiting[b].name {
+			return waiting[a].name < waiting[b].name
+		}
+		return waiting[a].vmIndex < waiting[b].vmIndex
+	})
+
+	available := max(int32(0), limit-occupied)
+	admit = make(map[int]bool)
+	positions = make(map[int]int32)
+	for rank := range waiting {
+		w := waiting[rank]
+		if w.selfIdx < 0 {
+			continue
+		}
+		if int32(rank) < available {
+			admit[w.selfIdx] = true
+		} else {
+			positions[w.selfIdx] = int32(rank + 1)
+		}
+	}
+	return admit, positions, occupied, int32(len(waiting)), nil
+}
+
 func (r *GradeRequestReconciler) handlePendingPhase(ctx context.Context, gr *v1alpha1.GradeRequest) error {
-	log := logf.FromContext(ctx)
+	orig := gr.DeepCopy()
 	normalizeGradeSpec(&gr.Spec)
 
 	if gr.Spec.Namespace == "" {
@@ -356,93 +512,86 @@ func (r *GradeRequestReconciler) handlePendingPhase(ctx context.Context, gr *v1a
 		}
 	}
 
+	// Concurrency gate. Only VMs that still need admission (Pending, not yet
+	// powered on / graded) are subject to it, and only when a limit is set.
+	// Skip the gate (and its uncached list) entirely otherwise, preserving the
+	// original fan-boot behavior when unlimited.
+	limit := gradeMaxConcurrent()
+	hasWaiting := slices.ContainsFunc(gr.Status.VMStatuses, gradeVMWaiting)
+
+	var admit map[int]bool
+	var positions map[int]int32
+	var occupied, waitingTotal int32
+	gated := limit > 0 && hasWaiting
+	if gated {
+		// Hold the gate across count -> decide -> power-on -> status write so a
+		// concurrent reconcile's uncached count always sees our admissions.
+		r.admissionMu.Lock()
+		defer r.admissionMu.Unlock()
+		var err error
+		admit, positions, occupied, waitingTotal, err = r.computeGradeAdmission(ctx, gr, limit)
+		if err != nil {
+			return err
+		}
+	}
+	admitted := func(i int) bool { return !gated || admit[i] }
+
 	needsRequeue := false
-	for i, vm := range gr.Spec.VMs {
+	admittedThisPass := int32(0)
+	queuedThisPass := int32(0)
+	for i := range gr.Spec.VMs {
+		vm := &gr.Spec.VMs[i]
 		vmStatus := &gr.Status.VMStatuses[i]
 		if vmStatus.Phase != v1alpha1.GradeRequestPhasePending {
 			// Already has a job or failed terminally on an earlier pass.
 			continue
 		}
 
-		phase, err := r.vmiPhase(ctx, gr.Spec.Namespace, vm.Name)
-		if err != nil {
-			return fmt.Errorf("get VMI phase for VM %s: %w", vm.Name, err)
-		}
-
-		// Powered-off VM: boot it and grade once it has had time to come up.
-		if gradeVMIsOff(phase) && vmStatus.BootStartedAt == nil {
-			if err := r.powerOnVM(ctx, gr.Spec.Namespace, vm.Name); err != nil {
-				vmStatus.Phase = v1alpha1.GradeRequestPhaseFailed
-				vmStatus.Message = fmt.Sprintf("failed to power on VM: %v", err)
+		// A still-waiting VM (not yet powered on / graded) must clear the
+		// concurrency gate before it may consume a slot.
+		if vmStatus.BootStartedAt == nil {
+			if !admitted(i) {
+				pos := positions[i]
+				vmStatus.QueuePosition = &pos
+				vmStatus.Message = fmt.Sprintf("Queued for grading (position %d of %d)", pos, waitingTotal)
+				needsRequeue = true
+				queuedThisPass++
 				continue
 			}
-			log.Info("powered on VM for grading", "gradeRequest", gr.Name, "vm", vm.Name)
-			now := metav1.Now()
-			vmStatus.AutoStarted = true
-			vmStatus.BootStartedAt = &now
-			vmStatus.Message = "Booting VM for grading"
-			needsRequeue = true
-			continue
+			vmStatus.QueuePosition = nil
+			admittedThisPass++
 		}
 
-		if gradeBootTimedOut(phase, vmStatus.AutoStarted, vmStatus.BootStartedAt, time.Now(), gradeBootTimeout) {
-			if err := r.powerOffVM(ctx, gr.Spec.Namespace, vm.Name); err != nil {
-				log.Error(err, "failed to power off VM after boot timeout", "gradeRequest", gr.Name, "vm", vm.Name)
-			}
-			vmStatus.Phase = v1alpha1.GradeRequestPhaseFailed
-			vmStatus.Message = fmt.Sprintf("VM did not reach Running within %s of power-on", gradeBootTimeout)
-			vmStatus.PoweredOff = true
-			continue
-		}
-
-		if !gradeBootGateReady(phase, vmStatus.AutoStarted, vmStatus.BootStartedAt, time.Now(), gradeBootWaitDuration()) {
-			// A VM we did not boot that is neither off nor Running (someone
-			// else is starting it, or it is stuck) must not hold the request
-			// in Pending forever — give it the same window an auto-started VM
-			// gets, measured from request creation.
-			if !vmStatus.AutoStarted && time.Since(gr.CreationTimestamp.Time) > gradeBootTimeout {
-				vmStatus.Phase = v1alpha1.GradeRequestPhaseFailed
-				vmStatus.Message = fmt.Sprintf("VM not Running within %s of grade request (VMI phase %q)", gradeBootTimeout, phase)
-				continue
-			}
-			vmStatus.Message = "Waiting for VM to be ready for grading"
-			needsRequeue = true
-			continue
-		}
-
-		existing, err := r.findRunningJobForVM(ctx, gr.Namespace, gr.Spec.Namespace, vm.Name)
+		requeue, err := r.driveGradeVM(ctx, gr, vm, vmStatus, methods[vm.Name])
 		if err != nil {
-			return fmt.Errorf("check existing jobs for VM %s: %w", vm.Name, err)
+			return err
 		}
-		if existing != "" {
-			log.Info("existing running job for VM, will requeue", "gradeRequest", gr.Name, "vm", vm.Name, "existingJob", existing)
+		if requeue {
 			needsRequeue = true
-			continue
 		}
+	}
 
-		job, err := r.buildJobForVM(gr, &vm, methods[vm.Name])
-		if err != nil {
-			return fmt.Errorf("build job for VM %s: %w", vm.Name, err)
-		}
-		_, err = r.Clientset.BatchV1().Jobs(gr.Namespace).Create(ctx, job, metav1.CreateOptions{})
-		if err != nil {
-			vmStatus.Phase = v1alpha1.GradeRequestPhaseFailed
-			vmStatus.Message = fmt.Sprintf("failed to create job: %v", err)
-			r.powerOffIfAutoStarted(ctx, gr, vmStatus)
-			continue
-		}
-
-		vmStatus.Phase = v1alpha1.GradeRequestPhaseRunning
-		vmStatus.JobName = job.Name
+	// Surface queue accounting so callers (the UI, stabilizer) can render it.
+	gr.Status.MaxSlots = limit
+	gr.Status.QueuedCount = queuedThisPass
+	if gated {
+		gr.Status.ActiveSlots = min(limit, occupied+admittedThisPass)
+	} else {
+		gr.Status.ActiveSlots = 0
 	}
 
 	if needsRequeue {
-		// Some VMs are still booting or blocked behind another grade job. Stay
-		// Pending so this loop keeps driving them, and persist the boot
-		// bookkeeping so it survives operator restarts.
+		// Some VMs are still booting, queued behind the concurrency limit, or
+		// blocked behind another grade job. Stay Pending so this loop keeps
+		// driving them, and persist the boot bookkeeping so it survives
+		// operator restarts.
 		gr.Status.Phase = v1alpha1.GradeRequestPhasePending
-		gr.Status.Message = "Waiting for VM(s) to be ready for grading"
-		if err := r.updateStatus(ctx, gr); err != nil {
+		if queuedThisPass > 0 {
+			gr.Status.Message = fmt.Sprintf("Queued: %d VM(s) waiting for a grading slot (%d/%d in use)", queuedThisPass, gr.Status.ActiveSlots, limit)
+		} else {
+			gr.Status.Message = "Waiting for VM(s) to be ready for grading"
+		}
+		if err := r.patchStatus(ctx, gr, orig); err != nil {
 			return err
 		}
 		return errGradeRequeue
@@ -452,7 +601,85 @@ func (r *GradeRequestReconciler) handlePendingPhase(ctx context.Context, gr *v1a
 	gr.Status.Phase = v1alpha1.GradeRequestPhaseRunning
 	gr.Status.StartedAt = &now
 	gr.Status.Message = fmt.Sprintf("Created grading jobs for %d VM(s)", len(gr.Spec.VMs))
-	return r.updateStatus(ctx, gr)
+	return r.patchStatus(ctx, gr, orig)
+}
+
+// driveGradeVM advances a single admitted VM through the boot/grade lifecycle:
+// it powers a stopped VM on, enforces the boot timeout and post-boot grace
+// gate, and creates the grading Job once the VM is ready. It mutates vmStatus in
+// place and reports whether the request must requeue to keep driving this VM.
+// Per-VM failures are recorded on vmStatus (not returned) so one bad VM does not
+// abort the whole request; only infrastructure errors are returned.
+func (r *GradeRequestReconciler) driveGradeVM(ctx context.Context, gr *v1alpha1.GradeRequest, vm *v1alpha1.GradeVM, vmStatus *v1alpha1.GradeVMStatus, method string) (bool, error) {
+	log := logf.FromContext(ctx)
+
+	phase, err := r.vmiPhase(ctx, gr.Spec.Namespace, vm.Name)
+	if err != nil {
+		return false, fmt.Errorf("get VMI phase for VM %s: %w", vm.Name, err)
+	}
+
+	// Powered-off VM: boot it and grade once it has had time to come up.
+	if gradeVMIsOff(phase) && vmStatus.BootStartedAt == nil {
+		if err := r.powerOnVM(ctx, gr.Spec.Namespace, vm.Name); err != nil {
+			vmStatus.Phase = v1alpha1.GradeRequestPhaseFailed
+			vmStatus.Message = fmt.Sprintf("failed to power on VM: %v", err)
+			return false, nil
+		}
+		log.Info("powered on VM for grading", "gradeRequest", gr.Name, "vm", vm.Name)
+		now := metav1.Now()
+		vmStatus.AutoStarted = true
+		vmStatus.BootStartedAt = &now
+		vmStatus.Message = "Booting VM for grading"
+		return true, nil
+	}
+
+	if gradeBootTimedOut(phase, vmStatus.AutoStarted, vmStatus.BootStartedAt, time.Now(), gradeBootTimeout) {
+		if err := r.powerOffVM(ctx, gr.Spec.Namespace, vm.Name); err != nil {
+			log.Error(err, "failed to power off VM after boot timeout", "gradeRequest", gr.Name, "vm", vm.Name)
+		}
+		vmStatus.Phase = v1alpha1.GradeRequestPhaseFailed
+		vmStatus.Message = fmt.Sprintf("VM did not reach Running within %s of power-on", gradeBootTimeout)
+		vmStatus.PoweredOff = true
+		return false, nil
+	}
+
+	if !gradeBootGateReady(phase, vmStatus.AutoStarted, vmStatus.BootStartedAt, time.Now(), gradeBootWaitDuration()) {
+		// A VM we did not boot that is neither off nor Running (someone else is
+		// starting it, or it is stuck) must not hold the request in Pending
+		// forever — give it the same window an auto-started VM gets, measured
+		// from request creation.
+		if !vmStatus.AutoStarted && time.Since(gr.CreationTimestamp.Time) > gradeBootTimeout {
+			vmStatus.Phase = v1alpha1.GradeRequestPhaseFailed
+			vmStatus.Message = fmt.Sprintf("VM not Running within %s of grade request (VMI phase %q)", gradeBootTimeout, phase)
+			return false, nil
+		}
+		vmStatus.Message = "Waiting for VM to be ready for grading"
+		return true, nil
+	}
+
+	existing, err := r.findRunningJobForVM(ctx, gr.Namespace, gr.Spec.Namespace, vm.Name)
+	if err != nil {
+		return false, fmt.Errorf("check existing jobs for VM %s: %w", vm.Name, err)
+	}
+	if existing != "" {
+		log.Info("existing running job for VM, will requeue", "gradeRequest", gr.Name, "vm", vm.Name, "existingJob", existing)
+		return true, nil
+	}
+
+	job, err := r.buildJobForVM(gr, vm, method)
+	if err != nil {
+		return false, fmt.Errorf("build job for VM %s: %w", vm.Name, err)
+	}
+	if _, err := r.Clientset.BatchV1().Jobs(gr.Namespace).Create(ctx, job, metav1.CreateOptions{}); err != nil {
+		vmStatus.Phase = v1alpha1.GradeRequestPhaseFailed
+		vmStatus.Message = fmt.Sprintf("failed to create job: %v", err)
+		r.powerOffIfAutoStarted(ctx, gr, vmStatus)
+		return false, nil
+	}
+
+	vmStatus.Phase = v1alpha1.GradeRequestPhaseRunning
+	vmStatus.JobName = job.Name
+	return false, nil
 }
 
 func (r *GradeRequestReconciler) handleRunningPhase(ctx context.Context, gr *v1alpha1.GradeRequest) error {
@@ -756,6 +983,18 @@ func (r *GradeRequestReconciler) updateStatus(ctx context.Context, gr *v1alpha1.
 	return nil
 }
 
+// patchStatus writes the grade request status via a merge patch computed against
+// orig. Unlike Update it carries no resourceVersion precondition, so a stale
+// cached object cannot 409 the write — important on the admission path, where a
+// power-on has already fired by the time the status is written and a failed
+// write would strand the VM (graded with no boot wait, never powered back off).
+func (r *GradeRequestReconciler) patchStatus(ctx context.Context, gr *v1alpha1.GradeRequest, orig *v1alpha1.GradeRequest) error {
+	if err := r.Status().Patch(ctx, gr, client.MergeFrom(orig)); err != nil {
+		return fmt.Errorf("patch grade request status: %w", err)
+	}
+	return nil
+}
+
 func (r *GradeRequestReconciler) cleanupIfExpired(ctx context.Context, gr *v1alpha1.GradeRequest) error {
 	log := logf.FromContext(ctx)
 	if gr.Status.CompletedAt == nil {
@@ -797,6 +1036,10 @@ func (r *GradeRequestReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 	r.DynamicClient = dynamicClient
 	r.Clientset = clientset
+	if r.Reader == nil {
+		// Uncached reader for the concurrency gate's global slot count.
+		r.Reader = mgr.GetAPIReader()
+	}
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.GradeRequest{}).

@@ -72,6 +72,12 @@ grading:
   # giving the guest OS time to bring up its serial console. Empty = the
   # reconciler's built-in default (90s).
   bootWaitSeconds: 240
+  # Maximum number of grades running concurrently cluster-wide. A slot is held
+  # by any VM the grader is booting-for-grade (including the boot wait) or
+  # actively grading, so a mass grade of powered-off machines drains in batches
+  # instead of booting every VM at once. Requests beyond the limit queue in
+  # FIFO order. 0 = unlimited (boot every VM immediately).
+  maxConcurrent: 10
 
 serviceAccount:
   create: true

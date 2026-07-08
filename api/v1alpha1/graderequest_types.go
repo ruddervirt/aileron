@@ -111,6 +111,12 @@ type GradeVMStatus struct {
 	// back off (or decided to leave it running), making power-off idempotent.
 	// +optional
 	PoweredOff bool `json:"poweredOff,omitempty"`
+
+	// queuePosition is the VM's 1-based place in the global grading queue while
+	// it waits for a free concurrency slot. It is set only while the VM is
+	// queued (not yet powered on / graded) and cleared once the VM is admitted.
+	// +optional
+	QueuePosition *int32 `json:"queuePosition,omitempty"`
 }
 
 // GradeRequestStatus defines the observed state of a grade request.
@@ -125,6 +131,21 @@ type GradeRequestStatus struct {
 	StartedAt *metav1.Time `json:"startedAt,omitempty"`
 	// +optional
 	CompletedAt *metav1.Time `json:"completedAt,omitempty"`
+
+	// activeSlots is the number of grading concurrency slots occupied
+	// cluster-wide (any VM booting-for-grade or with a running grade job) as
+	// observed on the last reconcile. Surfaced so callers can render queue
+	// state without recomputing it.
+	// +optional
+	ActiveSlots int32 `json:"activeSlots,omitempty"`
+	// maxSlots is the configured maximum number of concurrent grades (0 =
+	// unlimited).
+	// +optional
+	MaxSlots int32 `json:"maxSlots,omitempty"`
+	// queuedCount is the number of this request's VMs currently waiting for a
+	// free grading slot.
+	// +optional
+	QueuedCount int32 `json:"queuedCount,omitempty"`
 }
 
 // +kubebuilder:object:root=true

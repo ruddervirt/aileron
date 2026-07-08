@@ -114,9 +114,23 @@ spec:
             description: GradeRequestStatus defines the observed state of a grade
               request.
             properties:
+              activeSlots:
+                description: |-
+                  activeSlots is the number of grading concurrency slots occupied
+                  cluster-wide (any VM booting-for-grade or with a running grade job) as
+                  observed on the last reconcile. Surfaced so callers can render queue
+                  state without recomputing it.
+                format: int32
+                type: integer
               completedAt:
                 format: date-time
                 type: string
+              maxSlots:
+                description: |-
+                  maxSlots is the configured maximum number of concurrent grades (0 =
+                  unlimited).
+                format: int32
+                type: integer
               message:
                 type: string
               phase:
@@ -128,6 +142,12 @@ spec:
                 - Ready
                 - Failed
                 type: string
+              queuedCount:
+                description: |-
+                  queuedCount is the number of this request's VMs currently waiting for a
+                  free grading slot.
+                format: int32
+                type: integer
               startedAt:
                 format: date-time
                 type: string
@@ -168,6 +188,13 @@ spec:
                         poweredOff is true once the operator has powered an auto-started VM
                         back off (or decided to leave it running), making power-off idempotent.
                       type: boolean
+                    queuePosition:
+                      description: |-
+                        queuePosition is the VM's 1-based place in the global grading queue while
+                        it waits for a free concurrency slot. It is set only while the VM is
+                        queued (not yet powered on / graded) and cleared once the VM is admitted.
+                      format: int32
+                      type: integer
                     results:
                       items:
                         description: GradeCommandResult contains the result of a single

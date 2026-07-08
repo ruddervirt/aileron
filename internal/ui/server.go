@@ -193,10 +193,11 @@ func projectBuild(b *v1alpha1.VirtualMachineBuild) buildView {
 
 // gradeVMView is a per-VM grading result summary.
 type gradeVMView struct {
-	Name    string `json:"name"`
-	Phase   string `json:"phase"`
-	JobName string `json:"jobName,omitempty"`
-	Message string `json:"message"`
+	Name          string `json:"name"`
+	Phase         string `json:"phase"`
+	JobName       string `json:"jobName,omitempty"`
+	Message       string `json:"message"`
+	QueuePosition *int32 `json:"queuePosition,omitempty"`
 }
 
 type gradeView struct {
@@ -207,6 +208,9 @@ type gradeView struct {
 	TargetNamespace string        `json:"targetNamespace"`
 	StartedAt       *metav1.Time  `json:"startedAt,omitempty"`
 	CompletedAt     *metav1.Time  `json:"completedAt,omitempty"`
+	ActiveSlots     int32         `json:"activeSlots,omitempty"`
+	MaxSlots        int32         `json:"maxSlots,omitempty"`
+	QueuedCount     int32         `json:"queuedCount,omitempty"`
 	VMs             []gradeVMView `json:"vms"`
 }
 
@@ -219,14 +223,18 @@ func projectGrade(g *v1alpha1.GradeRequest) gradeView {
 		TargetNamespace: g.Spec.Namespace,
 		StartedAt:       g.Status.StartedAt,
 		CompletedAt:     g.Status.CompletedAt,
+		ActiveSlots:     g.Status.ActiveSlots,
+		MaxSlots:        g.Status.MaxSlots,
+		QueuedCount:     g.Status.QueuedCount,
 		VMs:             []gradeVMView{},
 	}
 	for _, vm := range g.Status.VMStatuses {
 		v.VMs = append(v.VMs, gradeVMView{
-			Name:    vm.Name,
-			Phase:   string(vm.Phase),
-			JobName: vm.JobName,
-			Message: vm.Message,
+			Name:          vm.Name,
+			Phase:         string(vm.Phase),
+			JobName:       vm.JobName,
+			Message:       vm.Message,
+			QueuePosition: vm.QueuePosition,
 		})
 	}
 	return v

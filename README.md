@@ -76,6 +76,7 @@ published images and Helm chart.
 | `egressExternal.gateway` | `172.17.0.1` | Egress gateway IP |
 | `grading.enabled` | `true` | Enable the `GradeRequest` reconciler |
 | `grading.bootWaitSeconds` | `240` | Seconds to wait after powering on a stopped VM before grading |
+| `grading.maxConcurrent` | `10` | Max grades running at once cluster-wide (a slot covers booting + grading); extra requests queue in FIFO order. `0` = unlimited |
 | `aileronUI.enabled` | `true` | Deploy the self-hosted web UI (unauthenticated — trusted networks only) |
 | `aileronUI.service.nodePort` | `30806` | NodePort for the UI (empty = auto-assign) |
 | `vncGateway.enabled` | `true` | Deploy the open-source VNC console gateway |

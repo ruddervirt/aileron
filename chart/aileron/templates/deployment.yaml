@@ -66,6 +66,13 @@ spec:
             - name: GRADER_BOOT_WAIT_SECONDS
               value: {{ .Values.grading.bootWaitSeconds | quote }}
             {{- end }}
+            {{- if not (kindIs "invalid" .Values.grading.maxConcurrent) }}
+            # Grading concurrency cap. Emitted even when 0 so an explicit 0
+            # (unlimited) reaches the operator instead of falling back to the
+            # built-in default.
+            - name: GRADE_MAX_CONCURRENT
+              value: {{ .Values.grading.maxConcurrent | quote }}
+            {{- end }}
             {{- end }}
             {{- if .Values.imagePullSecrets }}
             - name: IMAGE_PULL_SECRETS

@@ -157,9 +157,15 @@ function renderGradeItem(it) {
   const kids = [head];
   if (it.targetNamespace) kids.push(el('div', { class: 'msg', text: 'target ns: ' + it.targetNamespace }));
   if (it.message) kids.push(el('div', { class: 'msg', text: it.message }));
+  if (it.maxSlots) {
+    let slots = 'slots: ' + (it.activeSlots || 0) + '/' + it.maxSlots;
+    if (it.queuedCount) slots += ' (' + it.queuedCount + ' queued)';
+    kids.push(el('div', { class: 'msg', text: slots }));
+  }
   (it.vms || []).forEach((vm) => {
     let line = vm.name + ': ' + (vm.phase || '?');
-    if (vm.message) line += ' - ' + vm.message;
+    if (vm.queuePosition) line += ' - queued #' + vm.queuePosition;
+    else if (vm.message) line += ' - ' + vm.message;
     kids.push(el('div', { class: 'msg', text: line }));
   });
   kids.push(el('div', { class: 'actions' }, [deleteButton('grades', it.name)]));
