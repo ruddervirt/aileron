@@ -93,6 +93,7 @@ type VirtualMachineBuildReconciler struct {
 // +kubebuilder:rbac:groups=ruddervirt.io,resources=virtualmachinenamespaces/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=cdi.kubevirt.io,resources=datavolumes,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=kubevirt.io,resources=kubevirts,verbs=get;list;patch;update
+// +kubebuilder:rbac:groups=storage.k8s.io,resources=storageclasses,verbs=get;list
 // +kubebuilder:rbac:groups=kubevirt.io,resources=virtualmachines,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=kubevirt.io,resources=virtualmachineinstances,verbs=get;list;watch
 // +kubebuilder:rbac:groups=subresources.kubevirt.io,resources=virtualmachineinstances/portforward,verbs=get

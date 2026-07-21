@@ -110,6 +110,14 @@ rules:
       - list
       - patch
       - update
+  # Default StorageClass lookup for vmStateStorageClass (persistent vTPM)
+  - apiGroups:
+      - storage.k8s.io
+    resources:
+      - storageclasses
+    verbs:
+      - get
+      - list
   # KubeVirt VirtualMachines
   - apiGroups:
       - kubevirt.io
