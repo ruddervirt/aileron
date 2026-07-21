@@ -424,53 +424,6 @@ spec:
                         name:
                           description: name must match a VM name in spec.vms[].
                           type: string
-                        s3Export:
-                          description: s3Export optionally exports this VM's disk
-                            image to S3.
-                          properties:
-                            bucket:
-                              description: bucket is the S3 bucket name.
-                              type: string
-                            credentialsSecret:
-                              description: credentialsSecret references a Secret with
-                                keys AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.
-                              properties:
-                                name:
-                                  default: ""
-                                  description: |-
-                                    Name of the referent.
-                                    This field is effectively required, but due to backwards compatibility is
-                                    allowed to be empty. Instances of this type with an empty value here are
-                                    almost certainly wrong.
-                                    More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
-                                  type: string
-                              type: object
-                              x-kubernetes-map-type: atomic
-                            endpoint:
-                              description: endpoint is the S3 endpoint URL.
-                              type: string
-                            format:
-                              default: raw
-                              description: format is the disk image format to export.
-                                Defaults to "raw".
-                              enum:
-                              - raw
-                              - qcow2
-                              type: string
-                            key:
-                              description: key is the S3 object key (path) for the
-                                uploaded image.
-                              type: string
-                            region:
-                              description: region is the S3 region. Optional for non-AWS
-                                S3-compatible stores.
-                              type: string
-                          required:
-                          - bucket
-                          - credentialsSecret
-                          - endpoint
-                          - key
-                          type: object
                       required:
                       - dataVolume
                       - name
@@ -486,53 +439,6 @@ spec:
                   failure.
                 format: int32
                 type: integer
-              s3Export:
-                description: s3Export optionally exports all built VM disk images
-                  to S3.
-                properties:
-                  bucket:
-                    description: bucket is the S3 bucket name.
-                    type: string
-                  credentialsSecret:
-                    description: credentialsSecret references a Secret with keys AWS_ACCESS_KEY_ID
-                      and AWS_SECRET_ACCESS_KEY.
-                    properties:
-                      name:
-                        default: ""
-                        description: |-
-                          Name of the referent.
-                          This field is effectively required, but due to backwards compatibility is
-                          allowed to be empty. Instances of this type with an empty value here are
-                          almost certainly wrong.
-                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
-                        type: string
-                    type: object
-                    x-kubernetes-map-type: atomic
-                  endpoint:
-                    description: endpoint is the S3 endpoint URL.
-                    type: string
-                  format:
-                    default: raw
-                    description: format is the disk image format to export. Defaults
-                      to "raw".
-                    enum:
-                    - raw
-                    - qcow2
-                    type: string
-                  key:
-                    description: key is the S3 object key (path) for the uploaded
-                      image.
-                    type: string
-                  region:
-                    description: region is the S3 region. Optional for non-AWS S3-compatible
-                      stores.
-                    type: string
-                required:
-                - bucket
-                - credentialsSecret
-                - endpoint
-                - key
-                type: object
               timeout:
                 default: 30m
                 description: timeout is the maximum duration for the entire build.
@@ -1263,7 +1169,6 @@ spec:
                 - Networking
                 - Building
                 - CapturingDisks
-                - Exporting
                 - TemplateProvisioning
                 - Succeeded
                 - Failed
@@ -1272,29 +1177,6 @@ spec:
                 description: retryCount is the number of retries attempted.
                 format: int32
                 type: integer
-              s3Exports:
-                description: s3Exports records the state of S3 exports.
-                items:
-                  description: S3ExportStatus records the state of an S3 export.
-                  properties:
-                    checksum:
-                      description: checksum is the SHA-256 checksum of the uploaded
-                        image.
-                      type: string
-                    location:
-                      description: location is the full S3 URI.
-                      type: string
-                    uploaded:
-                      description: uploaded indicates whether the upload completed.
-                      type: boolean
-                    vmName:
-                      description: vmName is the VM this export belongs to.
-                      type: string
-                  required:
-                  - uploaded
-                  - vmName
-                  type: object
-                type: array
               startTime:
                 description: startTime is when the build started.
                 format: date-time

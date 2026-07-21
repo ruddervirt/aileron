@@ -52,8 +52,7 @@ var Transitions = map[v1alpha1.BuildPhase][]v1alpha1.BuildPhase{
 	v1alpha1.BuildPhasePending:              {v1alpha1.BuildPhaseNetworking, v1alpha1.BuildPhaseBuilding, v1alpha1.BuildPhaseFailed},
 	v1alpha1.BuildPhaseNetworking:           {v1alpha1.BuildPhaseBuilding, v1alpha1.BuildPhaseFailed},
 	v1alpha1.BuildPhaseBuilding:             {v1alpha1.BuildPhaseCapturingDisks, v1alpha1.BuildPhaseFailed},
-	v1alpha1.BuildPhaseCapturingDisks:       {v1alpha1.BuildPhaseExporting, v1alpha1.BuildPhaseTemplateProvisioning, v1alpha1.BuildPhaseFailed},
-	v1alpha1.BuildPhaseExporting:            {v1alpha1.BuildPhaseTemplateProvisioning, v1alpha1.BuildPhaseFailed},
+	v1alpha1.BuildPhaseCapturingDisks:       {v1alpha1.BuildPhaseTemplateProvisioning, v1alpha1.BuildPhaseFailed},
 	v1alpha1.BuildPhaseTemplateProvisioning: {v1alpha1.BuildPhaseSucceeded, v1alpha1.BuildPhaseFailed},
 }
 

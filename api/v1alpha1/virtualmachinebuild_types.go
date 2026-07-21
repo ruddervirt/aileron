@@ -26,7 +26,7 @@ import (
 // --- Phase enums ---
 
 // BuildPhase represents the overall build phase.
-// +kubebuilder:validation:Enum=Pending;Networking;Building;CapturingDisks;Exporting;TemplateProvisioning;Succeeded;Failed
+// +kubebuilder:validation:Enum=Pending;Networking;Building;CapturingDisks;TemplateProvisioning;Succeeded;Failed
 type BuildPhase string
 
 const (
@@ -34,7 +34,6 @@ const (
 	BuildPhaseNetworking           BuildPhase = "Networking"
 	BuildPhaseBuilding             BuildPhase = "Building"
 	BuildPhaseCapturingDisks       BuildPhase = "CapturingDisks"
-	BuildPhaseExporting            BuildPhase = "Exporting"
 	BuildPhaseTemplateProvisioning BuildPhase = "TemplateProvisioning"
 	BuildPhaseSucceeded            BuildPhase = "Succeeded"
 	BuildPhaseFailed               BuildPhase = "Failed"
@@ -520,10 +519,6 @@ type VMOutput struct {
 	// dataVolume configures the output DataVolume/PVC for this VM.
 	// +required
 	DataVolume DataVolumeOutput `json:"dataVolume"`
-
-	// s3Export optionally exports this VM's disk image to S3.
-	// +optional
-	S3Export *S3ExportOutput `json:"s3Export,omitempty"`
 }
 
 // DataVolumeOutput configures an output DataVolume.
@@ -543,34 +538,6 @@ type DataVolumeOutput struct {
 	// accessModes for the output PVC.
 	// +optional
 	AccessModes []corev1.PersistentVolumeAccessMode `json:"accessModes,omitempty"`
-}
-
-// S3ExportOutput configures exporting a built image to S3-compatible storage.
-type S3ExportOutput struct {
-	// endpoint is the S3 endpoint URL.
-	// +required
-	Endpoint string `json:"endpoint"`
-
-	// bucket is the S3 bucket name.
-	// +required
-	Bucket string `json:"bucket"`
-
-	// key is the S3 object key (path) for the uploaded image.
-	// +required
-	Key string `json:"key"`
-
-	// format is the disk image format to export. Defaults to "raw".
-	// +kubebuilder:default=raw
-	// +optional
-	Format DiskFormat `json:"format,omitempty"`
-
-	// region is the S3 region. Optional for non-AWS S3-compatible stores.
-	// +optional
-	Region string `json:"region,omitempty"`
-
-	// credentialsSecret references a Secret with keys AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.
-	// +required
-	CredentialsSecret corev1.LocalObjectReference `json:"credentialsSecret"`
 }
 
 // =============================================================================
@@ -760,10 +727,6 @@ type VirtualMachineBuildSpec struct {
 	// +optional
 	Output *BuildOutput `json:"output,omitempty"`
 
-	// s3Export optionally exports all built VM disk images to S3.
-	// +optional
-	S3Export *S3ExportOutput `json:"s3Export,omitempty"`
-
 	// httpDirectory references a ConfigMap whose data keys are served via HTTP
 	// to build VMs during boot. Use {{ .HTTPIP }} and {{ .HTTPPort }} in
 	// bootCommand strings to reference the server.
@@ -879,23 +842,6 @@ type DiskOutputVolume struct {
 	DataVolume string `json:"dataVolume"`
 }
 
-// S3ExportStatus records the state of an S3 export.
-type S3ExportStatus struct {
-	// vmName is the VM this export belongs to.
-	VMName string `json:"vmName"`
-
-	// uploaded indicates whether the upload completed.
-	Uploaded bool `json:"uploaded"`
-
-	// location is the full S3 URI.
-	// +optional
-	Location string `json:"location,omitempty"`
-
-	// checksum is the SHA-256 checksum of the uploaded image.
-	// +optional
-	Checksum string `json:"checksum,omitempty"`
-}
-
 // NetworkStatus records the state of the build's network resources.
 type NetworkStatus struct {
 	// vpcsCreated lists the KubeOVN VPC names created for this build.
@@ -953,10 +899,6 @@ type VirtualMachineBuildStatus struct {
 	// +optional
 	VMStatuses []VMBuildStatus `json:"vmStatuses,omitempty"`
 
-	// s3Exports records the state of S3 exports.
-	// +optional
-	S3Exports []S3ExportStatus `json:"s3Exports,omitempty"`
-
 	// retryCount is the number of retries attempted.
 	// +optional
 	RetryCount int32 `json:"retryCount,omitempty"`
@@ -977,7 +919,6 @@ const (
 	ConditionNetworkReady        = "NetworkReady"
 	ConditionAllVMsReady         = "AllVMsReady"
 	ConditionDisksCapture        = "DisksCaptured"
-	ConditionExported            = "Exported"
 	ConditionTemplateProvisioned = "TemplateProvisioned"
 )
 

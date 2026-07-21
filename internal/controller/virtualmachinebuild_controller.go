@@ -342,7 +342,6 @@ func (r *VirtualMachineBuildReconciler) Reconcile(ctx context.Context, req ctrl.
 		v1alpha1.BuildPhaseNetworking:           &build.NetworkSetup{Client: r.Client, RESTConfig: r.RESTConfig},
 		v1alpha1.BuildPhaseBuilding:             &buildingHandler{client: r.Client, restConfig: r.RESTConfig, sshKeyPair: sshKeyPair},
 		v1alpha1.BuildPhaseCapturingDisks:       &capturingHandler{client: r.Client},
-		v1alpha1.BuildPhaseExporting:            &exportingHandler{client: r.Client},
 		v1alpha1.BuildPhaseTemplateProvisioning: &build.TemplateProvisioner{Client: r.Client},
 	})
 
@@ -882,7 +881,7 @@ func (r *VirtualMachineBuildReconciler) setPhaseCondition(vmBuild *v1alpha1.Virt
 		condType = v1alpha1.ConditionAllVMsReady
 		reason = "AllVMsProvisioned"
 		message = "All VMs have been provisioned and shut down"
-	case v1alpha1.BuildPhaseExporting, v1alpha1.BuildPhaseTemplateProvisioning:
+	case v1alpha1.BuildPhaseTemplateProvisioning:
 		condType = v1alpha1.ConditionDisksCapture
 		reason = "DisksCaptured"
 		message = "All VM disks cloned to output DataVolumes"
@@ -1334,52 +1333,8 @@ func (h *capturingHandler) Handle(ctx context.Context, vmBuild *v1alpha1.Virtual
 	}
 
 	if allCaptured {
-		if vmBuild.Spec.S3Export != nil {
-			return v1alpha1.BuildPhaseExporting, nil
-		}
 		return v1alpha1.BuildPhaseTemplateProvisioning, nil
 	}
 
 	return v1alpha1.BuildPhaseCapturingDisks, nil
-}
-
-// exportingHandler drives S3 export for all VMs that have it configured.
-type exportingHandler struct {
-	client client.Client
-}
-
-func (h *exportingHandler) Handle(ctx context.Context, vmBuild *v1alpha1.VirtualMachineBuild) (v1alpha1.BuildPhase, error) {
-	s3Config := vmBuild.Spec.S3Export
-	exporter := &build.S3Exporter{Client: h.client}
-	allExported := true
-
-	for i := range vmBuild.Spec.VMs {
-		vmSpec := &vmBuild.Spec.VMs[i]
-
-		alreadyDone := false
-		for _, exp := range vmBuild.Status.S3Exports {
-			if exp.VMName == vmSpec.Name && exp.Uploaded {
-				alreadyDone = true
-				break
-			}
-		}
-		if alreadyDone {
-			continue
-		}
-
-		allExported = false
-
-		nextPhase, err := exporter.HandleVMExport(ctx, vmBuild, vmSpec, s3Config)
-		if err != nil {
-			if nextPhase == v1alpha1.BuildPhaseFailed {
-				return v1alpha1.BuildPhaseFailed, err
-			}
-			continue
-		}
-	}
-
-	if allExported {
-		return v1alpha1.BuildPhaseTemplateProvisioning, nil
-	}
-	return v1alpha1.BuildPhaseExporting, nil
 }
