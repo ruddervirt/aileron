@@ -28,9 +28,21 @@ var (
 // output so regex matching reflects what a human would see rather than the
 // raw byte stream. Useful for prompt/chunk detection when the shell is
 // repainting the screen (e.g. PowerShell progress bars).
+//
+// CSI/OSC sequences are replaced with a newline, not deleted outright. The
+// final OUT: line of a chunked response is often immediately followed -
+// with no intervening \r\n - by a cursor-repositioning escape sequence and
+// then the returning shell prompt (e.g. "...ZAXFM\x1b[18;1HC:\Windows\..."),
+// since the terminal repaints in place rather than scrolling. Deleting the
+// escape sequence outright would glue the prompt's leading characters onto
+// the chunk payload (both are drawn from the same alphanumeric alphabet),
+// and outChunkRe's greedy match would silently absorb them into the last
+// chunk - corrupting the base32 payload by a few bits and truncating the
+// decoded JSON by a byte. A newline is a real boundary the original stream
+// never has mid-chunk, so it can't be mistaken for payload content.
 func stripANSI(s string) string {
-	s = ansiOSCRe.ReplaceAllString(s, "")
-	s = ansiCSIRe.ReplaceAllString(s, "")
+	s = ansiOSCRe.ReplaceAllString(s, "\n")
+	s = ansiCSIRe.ReplaceAllString(s, "\n")
 	s = strings.ReplaceAll(s, "\x00", "")
 	return s
 }

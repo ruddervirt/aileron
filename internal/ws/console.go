@@ -278,11 +278,20 @@ func minDuration(a, b time.Duration) time.Duration {
 	return b
 }
 
+// cleanControlChars strips ANSI/control noise from terminal output.
+// Removed sequences are replaced with a space rather than deleted outright
+// - see stripANSI in protocol.go for why: without a boundary, text on
+// either side of a removed escape sequence can glue together into what
+// looks like one contiguous run of characters (e.g. a chunk payload
+// character immediately followed by a prompt's leading character),
+// corrupting anything that regex-matches alphanumeric runs out of this
+// output (decodeChunkedOutput's outChunkRe in particular). The inserted
+// space is collapsed along with everything else by whitespaceRegex below.
 func cleanControlChars(input string) string {
-	cleaned := ansiOSCRegex.ReplaceAllString(input, "")
-	cleaned = ansiCSIRegex.ReplaceAllString(cleaned, "")
-	cleaned = danglingOSCTitleRe.ReplaceAllString(cleaned, "")
-	cleaned = danglingCSIRegex.ReplaceAllString(cleaned, "")
+	cleaned := ansiOSCRegex.ReplaceAllString(input, " ")
+	cleaned = ansiCSIRegex.ReplaceAllString(cleaned, " ")
+	cleaned = danglingOSCTitleRe.ReplaceAllString(cleaned, " ")
+	cleaned = danglingCSIRegex.ReplaceAllString(cleaned, " ")
 	cleaned = whitespaceRegex.ReplaceAllString(cleaned, " ")
 	cleaned = controlCharRegex.ReplaceAllString(cleaned, "")
 	return strings.TrimSpace(cleaned)

@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -70,6 +71,42 @@ func TestDecodeChunkedOutput_DuplicateChunk(t *testing.T) {
 	_, err := decodeChunkedOutput(input)
 	if err == nil {
 		t.Fatal("expected error for duplicate chunk")
+	}
+}
+
+// TestStripANSI_DoesNotGlueAcrossRemovedEscapeSequence covers the actual
+// root cause of a real grading incident: a cursor-repositioning CSI
+// sequence sitting directly between the last OUT: chunk of a response and
+// the terminal's returning shell prompt, with no \r\n in between (this is
+// how a real SAC/EMS console emits it - the terminal repaints in place
+// rather than scrolling). Deleting the escape sequence outright glues the
+// chunk payload's last character onto the prompt's first character
+// (both draw from the same alphanumeric alphabet), which outChunkRe's
+// greedy match then silently absorbs into the chunk - corrupting the
+// decoded payload by a few bits.
+func TestStripANSI_DoesNotGlueAcrossRemovedEscapeSequence(t *testing.T) {
+	in := "OUT:0:ABCDEFGH\x1b[18;1HC:\\Windows\\System32>"
+	got := stripANSI(in)
+	if strings.Contains(got, "ABCDEFGHC") {
+		t.Fatalf("stripANSI glued the prompt's leading character onto the chunk payload: %q", got)
+	}
+}
+
+// TestDecodeChunkedOutput_SurvivesTrailingEscapeSequence reproduces the
+// exact shape of the incident transcript end-to-end: a chunk immediately
+// followed by a cursor-jump CSI sequence and the return prompt, with no
+// separating \r\n.
+func TestDecodeChunkedOutput_SurvivesTrailingEscapeSequence(t *testing.T) {
+	const want = "hello world"
+	encoded := crockfordEncoding.EncodeToString([]byte(want))
+	raw := "OUT:0:" + encoded + "\x1b[18;1HC:\\Windows\\System32>"
+
+	result, err := decodeChunkedOutput(stripANSI(raw))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if string(result) != want {
+		t.Errorf("got %q, want %q", string(result), want)
 	}
 }
 

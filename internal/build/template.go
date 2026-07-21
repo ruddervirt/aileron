@@ -66,7 +66,9 @@ func (t *TemplateProvisioner) Handle(ctx context.Context, build *v1alpha1.Virtua
 func (t *TemplateProvisioner) cleanupEphemeralResources(ctx context.Context, build *v1alpha1.VirtualMachineBuild, buildNS string) {
 	logger := log.FromContext(ctx)
 
-	// Delete source DVs (the import DVs, not the output DVs).
+	// Delete source DVs (the import DVs, not the output DVs) — boot disk and
+	// every secondary disk, now that DiskCapturer has cloned each into its
+	// own output DV.
 	for _, vmSpec := range build.Spec.VMs {
 		dvName := BuildNameForBuildVMDataVolume(BuildID(build), vmSpec.Name)
 		dv := &unstructured.Unstructured{}
@@ -77,6 +79,22 @@ func (t *TemplateProvisioner) cleanupEphemeralResources(ctx context.Context, bui
 		dv.SetNamespace(buildNS)
 		if err := t.Client.Delete(ctx, dv); err != nil && !errors.IsNotFound(err) {
 			logger.Error(err, "Failed to delete source DV", "dv", dvName)
+		}
+
+		for i, disk := range DefaultDisks(&vmSpec) {
+			if i == 0 {
+				continue
+			}
+			extraDVName := DiskDVName(BuildID(build), vmSpec.Name, i, disk.Name)
+			extraDV := &unstructured.Unstructured{}
+			extraDV.SetGroupVersionKind(schema.GroupVersionKind{
+				Group: "cdi.kubevirt.io", Version: "v1beta1", Kind: "DataVolume",
+			})
+			extraDV.SetName(extraDVName)
+			extraDV.SetNamespace(buildNS)
+			if err := t.Client.Delete(ctx, extraDV); err != nil && !errors.IsNotFound(err) {
+				logger.Error(err, "Failed to delete source DV", "dv", extraDVName)
+			}
 		}
 	}
 
@@ -211,9 +229,9 @@ func (t *TemplateProvisioner) convertToTemplate(ctx context.Context, build *v1al
 		// Remove build-time pod affinity.
 		unstructured.RemoveNestedField(vm.Object, "spec", "template", "spec", "affinity")
 
-		// Rebuild volumes: boot disk → output PVC, additional data disks → their
-		// own PVC, cloud-init → networkData only, drop ISOs.
-		t.rebuildVolumes(vm, pvcName, BootDisk(vmSpec).Name)
+		// Rebuild volumes: boot disk → output PVC, additional data disks →
+		// their own captured output PVC, cloud-init → networkData only, drop ISOs.
+		t.rebuildVolumes(vm, BuildID(build), vmSpec.Name, pvcName, BootDisk(vmSpec).Name)
 
 		// Rebuild disks: keep data disks, drop ISOs/CDROMs and pin the boot
 		// order to the boot disk so extra data disks can't steal the boot.
@@ -237,11 +255,12 @@ func (t *TemplateProvisioner) convertToTemplate(ctx context.Context, build *v1al
 
 // rebuildVolumes replaces volumes on the VM:
 //   - boot disk: source dataVolume → captured output PVC (pvcName)
-//   - additional data disks: dataVolume ref → their own PVC (CDI names the PVC
-//     after the DataVolume, so the claim name is the DataVolume name unchanged)
+//   - additional data disks: source dataVolume → their own captured output
+//     PVC (BuildNameForOutputDiskDV), the same capture step the boot disk
+//     gets, so their content also survives cleanupEphemeralResources
 //   - cloudinit: strip userData, keep networkData (or remove if no NICs)
 //   - ISOs: removed
-func (t *TemplateProvisioner) rebuildVolumes(vm *unstructured.Unstructured, pvcName, bootDiskName string) {
+func (t *TemplateProvisioner) rebuildVolumes(vm *unstructured.Unstructured, buildID, vmName, pvcName, bootDiskName string) {
 	volumes, _, _ := unstructured.NestedSlice(vm.Object, "spec", "template", "spec", "volumes")
 
 	var kept []any
@@ -260,7 +279,7 @@ func (t *TemplateProvisioner) rebuildVolumes(vm *unstructured.Unstructured, pvcN
 
 		// Disk volumes are dataVolume-backed during the build; swap each to a
 		// persistentVolumeClaim reference for the template.
-		if dv, hasDV := vol["dataVolume"]; hasDV {
+		if _, hasDV := vol["dataVolume"]; hasDV {
 			delete(vol, "dataVolume")
 			if name == bootDiskName {
 				// Boot disk → captured output PVC.
@@ -268,15 +287,9 @@ func (t *TemplateProvisioner) rebuildVolumes(vm *unstructured.Unstructured, pvcN
 					"claimName": pvcName,
 				}
 			} else {
-				// Additional data disk → its own blank DV-backed PVC. The DV
-				// is not captured to an output copy, so reuse its name (CDI
-				// creates a same-named PVC) to keep the disk's contents.
-				dvName := ""
-				if dvMap, ok := dv.(map[string]any); ok {
-					dvName, _, _ = unstructured.NestedString(dvMap, "name")
-				}
+				// Additional data disk → its own captured output PVC.
 				vol["persistentVolumeClaim"] = map[string]any{
-					"claimName": dvName,
+					"claimName": BuildNameForOutputDiskDV(buildID, vmName, name),
 				}
 			}
 			kept = append(kept, vol)

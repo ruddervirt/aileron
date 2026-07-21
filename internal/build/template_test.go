@@ -73,7 +73,7 @@ func TestRebuildVolumes_MultiDisk(t *testing.T) {
 		},
 	})
 
-	tp.rebuildVolumes(vm, "bld-out-server", "rootdisk")
+	tp.rebuildVolumes(vm, "bld", "server", "bld-out-server", "rootdisk")
 
 	volumes, _, _ := unstructured.NestedSlice(vm.Object, "spec", "template", "spec", "volumes")
 	if len(volumes) != 2 {
@@ -83,8 +83,8 @@ func TestRebuildVolumes_MultiDisk(t *testing.T) {
 	if got := claimName(t, volumeByName(t, vm, "rootdisk")); got != "bld-out-server" {
 		t.Errorf("rootdisk claim = %q, want bld-out-server", got)
 	}
-	if got := claimName(t, volumeByName(t, vm, "supplemental")); got != "bld-server-supplemental" {
-		t.Errorf("supplemental claim = %q, want bld-server-supplemental (its own PVC, not the boot PVC)", got)
+	if got := claimName(t, volumeByName(t, vm, "supplemental")); got != "bld-out-server-supplemental" {
+		t.Errorf("supplemental claim = %q, want bld-out-server-supplemental (its own captured output PVC, not the boot PVC)", got)
 	}
 	if volumeByName(t, vm, "iso0") != nil {
 		t.Error("iso0 volume should have been dropped")
@@ -107,13 +107,13 @@ func TestRebuildVolumes_NonRootBootDisk(t *testing.T) {
 		},
 	})
 
-	tp.rebuildVolumes(vm, "bld-out-server", "os")
+	tp.rebuildVolumes(vm, "bld", "server", "bld-out-server", "os")
 
 	if got := claimName(t, volumeByName(t, vm, "os")); got != "bld-out-server" {
 		t.Errorf("os (boot) claim = %q, want bld-out-server", got)
 	}
-	if got := claimName(t, volumeByName(t, vm, "data")); got != "bld-server-data" {
-		t.Errorf("data claim = %q, want bld-server-data", got)
+	if got := claimName(t, volumeByName(t, vm, "data")); got != "bld-out-server-data" {
+		t.Errorf("data claim = %q, want bld-out-server-data", got)
 	}
 }
 
@@ -135,7 +135,7 @@ func TestRebuildVolumes_CloudInitStripsUserData(t *testing.T) {
 		},
 	})
 
-	tp.rebuildVolumes(vm, "bld-out-server", "rootdisk")
+	tp.rebuildVolumes(vm, "bld", "server", "bld-out-server", "rootdisk")
 
 	ci := volumeByName(t, vm, "cloudinit")
 	if ci == nil {

@@ -492,8 +492,51 @@ var _ = Describe("normalizeBuildRefDisks", func() {
 			}
 
 			changed, err := r.normalizeBuildRefDisks(ctx, child)
-			Expect(err).To(MatchError(ContainSubstring("collides with inherited boot disk")))
+			Expect(err).To(MatchError(ContainSubstring("collides with an inherited parent disk")))
 			Expect(changed).To(BeFalse())
+		})
+
+		It("errors when a listed disk collides with an inherited secondary disk name", func() {
+			createParent("parent-collide-secondary", []aileroniov1alpha1.BuildDisk{
+				disk("rootdisk", "25Gi", "virtio"),
+				disk("supplemental", "5Gi", "virtio"),
+			})
+
+			child := &aileroniov1alpha1.BuildVM{
+				Name: "server",
+				Source: aileroniov1alpha1.BuildSource{
+					BuildRef: &aileroniov1alpha1.BuildReference{Name: "parent-collide-secondary", Namespace: "default"},
+				},
+				Disks: []aileroniov1alpha1.BuildDisk{disk("supplemental", "5Gi", "virtio")},
+			}
+
+			changed, err := r.normalizeBuildRefDisks(ctx, child)
+			Expect(err).To(MatchError(ContainSubstring("collides with an inherited parent disk")))
+			Expect(changed).To(BeFalse())
+		})
+
+		It("inherits all of the parent's disks, not just the boot disk", func() {
+			createParent("parent-multi", []aileroniov1alpha1.BuildDisk{
+				disk("rootdisk", "25Gi", "virtio"),
+				disk("supplemental", "5Gi", "usb"),
+			})
+
+			child := &aileroniov1alpha1.BuildVM{
+				Name: "server",
+				Source: aileroniov1alpha1.BuildSource{
+					BuildRef: &aileroniov1alpha1.BuildReference{Name: "parent-multi", Namespace: "default"},
+				},
+				Disks: []aileroniov1alpha1.BuildDisk{disk("scratch", "1Gi", "virtio")},
+			}
+
+			changed, err := r.normalizeBuildRefDisks(ctx, child)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(changed).To(BeTrue())
+			Expect(child.Disks).To(HaveLen(3))
+			Expect(child.Disks[0].Name).To(Equal("rootdisk"))
+			Expect(child.Disks[1].Name).To(Equal("supplemental"))
+			Expect(child.Disks[1].Bus).To(Equal("usb"))
+			Expect(child.Disks[2].Name).To(Equal("scratch"))
 		})
 	})
 

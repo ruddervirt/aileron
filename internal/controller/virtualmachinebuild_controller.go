@@ -532,12 +532,16 @@ func (r *VirtualMachineBuildReconciler) handleDeletion(ctx context.Context, vmBu
 }
 
 // normalizeBuildRefDisks adjusts the disk list for a VM whose source is another
-// build (source.buildRef). The boot disk is always inherited from the parent
-// build's boot disk so its bus matches what the OS was installed on — e.g. a
-// Windows image built on SCSI won't BSOD with INACCESSIBLE_BOOT_DEVICE when
-// booted on VirtIO. Every disk the child specifies is treated as an ADDITIONAL
-// data disk placed after the inherited boot disk. For non-buildRef sources the
-// disk list is left unchanged (the VM's own first disk is the boot disk).
+// build (source.buildRef). ALL of the parent's disks are inherited — the boot
+// disk so its bus matches what the OS was installed on (e.g. a Windows image
+// built on SCSI won't BSOD with INACCESSIBLE_BOOT_DEVICE when booted on
+// VirtIO), and any secondary/data disks the parent declared so their content
+// (each captured to its own output DataVolume by DiskCapturer, and cloned
+// forward by resolveBuildRef in internal/build/source.go) also survives the
+// layer boundary. Every disk the child specifies itself is treated as an
+// ADDITIONAL data disk placed after the inherited disks. For non-buildRef
+// sources the disk list is left unchanged (the VM's own first disk is the
+// boot disk).
 //
 // This mutates vmSpec.Disks and must run exactly once; the caller gates it with
 // disksNormalizedAnnotation. Returns (changed, error).
@@ -574,19 +578,22 @@ func (r *VirtualMachineBuildReconciler) normalizeBuildRefDisks(ctx context.Conte
 		return false, fmt.Errorf("parent build %s has no VM %q", ref.Name, parentVMName)
 	}
 
-	bootDisk := build.BootDisk(parentVM)
+	parentDisks := build.DefaultDisks(parentVM)
 
-	// The inherited boot disk and the child's data disks must have distinct
-	// names, otherwise KubeVirt rejects the VM for duplicate volume names.
+	// The inherited disks and the child's own additional disks must have
+	// distinct names, otherwise KubeVirt rejects the VM for duplicate volume
+	// names.
 	for _, d := range vmSpec.Disks {
-		if d.Name == bootDisk.Name {
-			return false, fmt.Errorf(
-				"VM %s: additional disk %q collides with inherited boot disk name; rename it",
-				vmSpec.Name, d.Name)
+		for _, pd := range parentDisks {
+			if d.Name == pd.Name {
+				return false, fmt.Errorf(
+					"VM %s: additional disk %q collides with an inherited parent disk name; rename it",
+					vmSpec.Name, d.Name)
+			}
 		}
 	}
 
-	vmSpec.Disks = append([]v1alpha1.BuildDisk{bootDisk}, vmSpec.Disks...)
+	vmSpec.Disks = append(append([]v1alpha1.BuildDisk{}, parentDisks...), vmSpec.Disks...)
 	return true, nil
 }
 

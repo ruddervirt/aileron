@@ -96,7 +96,11 @@ func (s *SourceImporter) HandleVM(ctx context.Context, build *v1alpha1.VirtualMa
 	}
 	logger.Info("Created source DataVolume", "dv", dvName, "ns", dvNamespace)
 
-	// Create blank DataVolumes for additional disks (index > 0).
+	// Create DataVolumes for additional disks (index > 0). A disk inherited
+	// from a buildRef parent (its name matches one of the parent's captured
+	// secondary disks) is cloned from that parent disk's output DV so its
+	// content survives the layer boundary; any disk the child declares
+	// itself is created blank, as before.
 	for i, d := range DefaultDisks(vmSpec) {
 		if i == 0 {
 			continue
@@ -112,12 +116,34 @@ func (s *SourceImporter) HandleVM(ctx context.Context, build *v1alpha1.VirtualMa
 			LabelBuildNamespace: build.Namespace,
 			LabelVM:             vmSpec.Name,
 		})
+
+		diskSize := d.Size
+		var diskSource map[string]any
+		if pd, ok := resolved.parentDataDisks[d.Name]; ok {
+			diskSource = map[string]any{
+				"pvc": map[string]any{
+					"name":      pd.pvcName,
+					"namespace": pd.pvcNamespace,
+				},
+			}
+			if pd.sourceSize != nil {
+				headroom := resource.MustParse(pvcCloneHeadroom)
+				minSize := pd.sourceSize.DeepCopy()
+				minSize.Add(headroom)
+				if diskSize.Cmp(minSize) < 0 {
+					diskSize = minSize
+				}
+			}
+		} else {
+			diskSource = map[string]any{"blank": map[string]any{}}
+		}
+
 		extraSpec := map[string]any{
-			"source": map[string]any{"blank": map[string]any{}},
+			"source": diskSource,
 			"storage": map[string]any{
 				"resources": map[string]any{
 					"requests": map[string]any{
-						"storage": d.Size.String(),
+						"storage": diskSize.String(),
 					},
 				},
 				"volumeMode": "Filesystem",
@@ -235,6 +261,21 @@ type resolvedSource struct {
 	// PVC-based clones). Used by buildDataVolume to ensure the target DV is
 	// at least as large as the source + headroom.
 	sourceSize *resource.Quantity
+
+	// parentDataDisks holds the captured output DV location for each of a
+	// buildRef parent's secondary (non-boot) disks, keyed by disk name.
+	// Populated only when the source is a buildRef whose parent captured
+	// secondary disks. HandleVM's extra-disk loop clones from these instead
+	// of creating a blank disk when a child disk name matches.
+	parentDataDisks map[string]parentDiskSource
+}
+
+// parentDiskSource is the resolved clone source for one of a buildRef
+// parent's secondary disks.
+type parentDiskSource struct {
+	pvcName      string
+	pvcNamespace string
+	sourceSize   *resource.Quantity
 }
 
 // pvcCloneHeadroom is added to the source PVC size when the spec's requested
@@ -329,7 +370,26 @@ func (s *SourceImporter) resolveBuildRef(ctx context.Context, build *v1alpha1.Vi
 	// is at least as large (CDI rejects clones where target < source).
 	sourceSize := s.lookupPVCSize(ctx, dvName, dvNamespace)
 
-	return &resolvedSource{pvcName: dvName, pvcNamespace: dvNamespace, sourceSize: sourceSize}, nil
+	resolved := &resolvedSource{pvcName: dvName, pvcNamespace: dvNamespace, sourceSize: sourceSize}
+
+	// Resolve the parent's captured secondary disks too, so the extra-disk
+	// loop in HandleVM can clone them forward instead of creating them blank.
+	if len(targetVMStatus.OutputDataVolumes) > 0 {
+		resolved.parentDataDisks = make(map[string]parentDiskSource, len(targetVMStatus.OutputDataVolumes))
+		for _, dov := range targetVMStatus.OutputDataVolumes {
+			ns, name, err := parseNamespacedName(dov.DataVolume)
+			if err != nil {
+				continue // shouldn't happen; skip defensively, disk falls back to blank
+			}
+			resolved.parentDataDisks[dov.Name] = parentDiskSource{
+				pvcName:      name,
+				pvcNamespace: ns,
+				sourceSize:   s.lookupPVCSize(ctx, name, ns),
+			}
+		}
+	}
+
+	return resolved, nil
 }
 
 func parseNamespacedName(s string) (namespace, name string, err error) {

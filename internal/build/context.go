@@ -52,9 +52,16 @@ func BuildNameForBuildVMDataVolume(buildID, vmName string) string {
 	return fmt.Sprintf("%s-src-%s", buildID, vmName)
 }
 
-// BuildNameForOutputDV returns the output DataVolume name for a built VM.
+// BuildNameForOutputDV returns the output DataVolume name for a built VM's
+// boot disk.
 func BuildNameForOutputDV(buildID, vmName string) string {
 	return fmt.Sprintf("%s-out-%s", buildID, vmName)
+}
+
+// BuildNameForOutputDiskDV returns the output DataVolume name for a built
+// VM's secondary (non-boot) disk.
+func BuildNameForOutputDiskDV(buildID, vmName, diskName string) string {
+	return fmt.Sprintf("%s-out-%s-%s", buildID, vmName, diskName)
 }
 
 // SourceCacheKey returns a deterministic cache key for a build source.

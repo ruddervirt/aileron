@@ -856,9 +856,27 @@ type VMBuildStatus struct {
 	// +optional
 	OutputDataVolume string `json:"outputDataVolume,omitempty"`
 
+	// outputDataVolumes records the captured output DataVolume for each of
+	// this VM's secondary (non-boot) disks. The boot disk's capture is
+	// recorded separately in outputDataVolume; this field mirrors that same
+	// capture step for every disk at spec.disks[1:], so a buildRef child can
+	// clone a parent's secondary disks the same way it clones the boot disk.
+	// +optional
+	OutputDataVolumes []DiskOutputVolume `json:"outputDataVolumes,omitempty"`
+
 	// provisionerResults records the outcome of each provisioner step for this VM.
 	// +optional
 	ProvisionerResults []ProvisionerResult `json:"provisionerResults,omitempty"`
+}
+
+// DiskOutputVolume records the captured output DataVolume for a single
+// secondary (non-boot) disk.
+type DiskOutputVolume struct {
+	// name is the disk identifier (matches BuildDisk.Name).
+	Name string `json:"name"`
+
+	// dataVolume is the namespace/name of the captured output DataVolume.
+	DataVolume string `json:"dataVolume"`
 }
 
 // S3ExportStatus records the state of an S3 export.
