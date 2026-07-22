@@ -20,6 +20,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -385,8 +386,7 @@ func (r *VirtualMachineCloneReconciler) handleNetworking(ctx context.Context, vm
 	var vpcsCreated []string
 	for _, vpcSpec := range vpcs {
 		vpcName := network.VPCName(vmClone.Status.CloneID, vpcSpec.Name)
-		vpcInternet := vpcSpec.Internet
-		if err := network.EnsureVPC(ctx, r.Client, vpcName, cloneNS, vpcInternet, labels); err != nil {
+		if err := network.EnsureVPC(ctx, r.Client, vpcName, cloneNS, labels); err != nil {
 			return ctrl.Result{}, fmt.Errorf("ensuring VPC %s: %w", vpcName, err)
 		}
 		vpcsCreated = append(vpcsCreated, vpcName)
@@ -683,6 +683,29 @@ func (r *VirtualMachineCloneReconciler) handlePowerManagement(ctx context.Contex
 		}
 		if egressEnabled != vmClone.Status.EgressGatewayReady {
 			changed = true
+		}
+
+		// Self-heal the VPC default route. The gateway pod can be replaced
+		// at any time (crash, eviction, node drain) and comes back with a
+		// new internal IP; EnsureVPCDefaultRoute only ran once, when the
+		// clone first left the Networking phase, so a route left pointing
+		// at a dead pod IP would otherwise never be corrected. Re-verify it
+		// on every power-management poll instead.
+		if egressEnabled && !scaleFailed {
+			for _, gwName := range vmClone.Status.Network.EgressGatewaysCreated {
+				vpcName := strings.TrimSuffix(gwName, "-egress")
+				ready, internalIP, err := network.IsEgressGatewayReady(ctx, r.Client, gwName, cloneNS)
+				if err != nil {
+					logger.Error(err, "Failed to check egress gateway readiness", "gateway", gwName)
+					continue
+				}
+				if !ready || internalIP == "" {
+					continue
+				}
+				if err := network.EnsureVPCDefaultRoute(ctx, r.Client, vpcName, internalIP); err != nil {
+					logger.Error(err, "Failed to correct VPC default route", "vpc", vpcName, "gateway", gwName)
+				}
+			}
 		}
 	}
 

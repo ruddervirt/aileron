@@ -14,7 +14,14 @@ import (
 // EnsureVPC creates a KubeOVN VPC if it doesn't exist.
 // The namespace parameter binds the VPC to the build namespace, which is
 // required for KubeOVN to route traffic from pods in that namespace.
-func EnsureVPC(ctx context.Context, c client.Client, name, namespace string, internet bool, labels map[string]string) error {
+//
+// enableExternal is deliberately never set to true here: it's KubeOVN's own
+// built-in EIP/SNAT external-gateway feature, which requires a subnet named
+// "external" that this cluster doesn't have and doesn't need — aileron's
+// internet egress is provided independently via VpcEgressGateway (see
+// EnsureEgressGateway) and subnet-level natOutgoing. Leaving enableExternal
+// true puts the VPC into KubeOVN's EIP-SNAT reconcile loop forever.
+func EnsureVPC(ctx context.Context, c client.Client, name, namespace string, labels map[string]string) error {
 	existing := &unstructured.Unstructured{}
 	existing.SetGroupVersionKind(schema.GroupVersionKind{
 		Group: "kubeovn.io", Version: "v1", Kind: "Vpc",
@@ -24,10 +31,10 @@ func EnsureVPC(ctx context.Context, c client.Client, name, namespace string, int
 		if existing.GetDeletionTimestamp() != nil {
 			return fmt.Errorf("VPC %s is being deleted, waiting for cleanup", name)
 		}
-		// Validate spec matches desired state. If enableExternal drifted, update it.
+		// Correct any VPC left with enableExternal:true from before this fix.
 		currentExternal, _, _ := unstructured.NestedBool(existing.Object, "spec", "enableExternal")
-		if currentExternal != internet {
-			if err := unstructured.SetNestedField(existing.Object, internet, "spec", "enableExternal"); err != nil {
+		if currentExternal {
+			if err := unstructured.SetNestedField(existing.Object, false, "spec", "enableExternal"); err != nil {
 				return fmt.Errorf("setting enableExternal on VPC %s: %w", name, err)
 			}
 			if err := c.Update(ctx, existing); err != nil {
@@ -54,7 +61,7 @@ func EnsureVPC(ctx context.Context, c client.Client, name, namespace string, int
 				"labels": labelsIface,
 			},
 			"spec": map[string]any{
-				"enableExternal": internet,
+				"enableExternal": false,
 				"namespaces":     []any{namespace},
 			},
 		},

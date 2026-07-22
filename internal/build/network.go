@@ -66,8 +66,7 @@ func (n *NetworkSetup) Handle(ctx context.Context, build *v1alpha1.VirtualMachin
 	// Create VPCs.
 	for _, vpc := range vpcs {
 		vpcName := buildVPCName(buildID, vpc.Name)
-		internet := effectiveVPCInternet(build, vpc)
-		if err := network.EnsureVPC(ctx, n.Client, vpcName, buildNS, internet, labels); err != nil {
+		if err := network.EnsureVPC(ctx, n.Client, vpcName, buildNS, labels); err != nil {
 			return v1alpha1.BuildPhaseNetworking, fmt.Errorf("ensuring VPC %s: %w", vpc.Name, err)
 		}
 		if !slices.Contains(build.Status.Network.VPCsCreated, vpcName) {
