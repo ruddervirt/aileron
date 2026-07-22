@@ -6,17 +6,26 @@ import (
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
+// listKindSuffix is the suffix Kubernetes list kinds use (e.g. Vpc -> VpcList).
+const listKindSuffix = "List"
+
+// listGVKFor returns the List variant of a GVK, for registering the
+// corresponding UnstructuredList type on a fake client scheme.
+func listGVKFor(gvk schema.GroupVersionKind) schema.GroupVersionKind {
+	gvk.Kind += listKindSuffix
+	return gvk
+}
+
 func vpcScheme() *runtime.Scheme {
 	s := runtime.NewScheme()
 	s.AddKnownTypeWithName(vpcGVK, &unstructured.Unstructured{})
-	lg := vpcGVK
-	lg.Kind += "List"
-	s.AddKnownTypeWithName(lg, &unstructured.UnstructuredList{})
+	s.AddKnownTypeWithName(listGVKFor(vpcGVK), &unstructured.UnstructuredList{})
 	return s
 }
 

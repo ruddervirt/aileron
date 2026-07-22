@@ -9,16 +9,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
+// testGatewayIP is the egress gateway's current internal IP across these
+// tests, standing in for whatever address KubeOVN happened to assign.
+const testGatewayIP = "10.0.1.3"
+
 func egressScheme() *runtime.Scheme {
 	s := vpcScheme()
-	for _, gvk := range []struct{ kind string }{{"VpcEgressGateway"}} {
-		g := vpcEgressGatewayGVK
-		g.Kind = gvk.kind
-		s.AddKnownTypeWithName(g, &unstructured.Unstructured{})
-		lg := g
-		lg.Kind += "List"
-		s.AddKnownTypeWithName(lg, &unstructured.UnstructuredList{})
-	}
+	s.AddKnownTypeWithName(vpcEgressGatewayGVK, &unstructured.Unstructured{})
+	s.AddKnownTypeWithName(listGVKFor(vpcEgressGatewayGVK), &unstructured.UnstructuredList{})
 	return s
 }
 
@@ -45,7 +43,7 @@ func TestEnsureVPCDefaultRoute_ReplacesStaleRoute(t *testing.T) {
 	}
 	c := fake.NewClientBuilder().WithScheme(vpcScheme()).WithObjects(vpc).Build()
 
-	if err := EnsureVPCDefaultRoute(context.Background(), c, "vpc1", "10.0.1.3"); err != nil {
+	if err := EnsureVPCDefaultRoute(context.Background(), c, "vpc1", testGatewayIP); err != nil {
 		t.Fatalf("EnsureVPCDefaultRoute: %v", err)
 	}
 
@@ -55,8 +53,8 @@ func TestEnsureVPCDefaultRoute_ReplacesStaleRoute(t *testing.T) {
 		t.Fatalf("staticRoutes = %v, want exactly 1 route", routes)
 	}
 	route, _ := routes[0].(map[string]any)
-	if hop, _ := route["nextHopIP"].(string); hop != "10.0.1.3" {
-		t.Errorf("nextHopIP = %q, want %q (stale route was not corrected)", hop, "10.0.1.3")
+	if hop, _ := route["nextHopIP"].(string); hop != testGatewayIP {
+		t.Errorf("nextHopIP = %q, want %q (stale route was not corrected)", hop, testGatewayIP)
 	}
 }
 
@@ -85,15 +83,15 @@ func newEgressGateway(name string, conditions []any, internalIPs []any, readyRep
 func TestIsEgressGatewayReady_ReadyCondition(t *testing.T) {
 	gw := newEgressGateway("gw1",
 		[]any{map[string]any{"type": "Ready", "status": "True"}},
-		[]any{"10.0.1.3"}, 0)
+		[]any{testGatewayIP}, 0)
 	c := fake.NewClientBuilder().WithScheme(egressScheme()).WithObjects(gw).Build()
 
 	ready, ip, err := IsEgressGatewayReady(context.Background(), c, "gw1", testNamespace)
 	if err != nil {
 		t.Fatalf("IsEgressGatewayReady: %v", err)
 	}
-	if !ready || ip != "10.0.1.3" {
-		t.Errorf("ready=%v ip=%q, want ready=true ip=10.0.1.3", ready, ip)
+	if !ready || ip != testGatewayIP {
+		t.Errorf("ready=%v ip=%q, want ready=true ip=%s", ready, ip, testGatewayIP)
 	}
 }
 
@@ -105,15 +103,15 @@ func TestIsEgressGatewayReady_ReadyCondition(t *testing.T) {
 // which is why the fix re-verifies on every power-management poll rather
 // than once.
 func TestIsEgressGatewayReady_ReadyReplicasFallback(t *testing.T) {
-	gw := newEgressGateway("gw1", nil, []any{"10.0.1.3"}, 1)
+	gw := newEgressGateway("gw1", nil, []any{testGatewayIP}, 1)
 	c := fake.NewClientBuilder().WithScheme(egressScheme()).WithObjects(gw).Build()
 
 	ready, ip, err := IsEgressGatewayReady(context.Background(), c, "gw1", testNamespace)
 	if err != nil {
 		t.Fatalf("IsEgressGatewayReady: %v", err)
 	}
-	if !ready || ip != "10.0.1.3" {
-		t.Errorf("ready=%v ip=%q, want ready=true ip=10.0.1.3", ready, ip)
+	if !ready || ip != testGatewayIP {
+		t.Errorf("ready=%v ip=%q, want ready=true ip=%s", ready, ip, testGatewayIP)
 	}
 }
 
