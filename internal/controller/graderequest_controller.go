@@ -439,6 +439,19 @@ func (r *GradeRequestReconciler) computeGradeAdmission(ctx context.Context, gr *
 		if o.Name == gr.Name && o.Namespace == gr.Namespace {
 			continue
 		}
+		// A request that has reached a terminal phase is done: its VMs neither
+		// occupy a slot nor wait for one. Skip it before classify, which would
+		// otherwise count any spec VM lacking a matching status entry as
+		// "waiting". A request failed before its per-VM statuses were
+		// initialized — e.g. failGradeRequest firing when a target VM no longer
+		// exists (a preview clone reprovisioned out from under an in-flight
+		// grade) — has status.vmStatuses == nil, so every one of its spec VMs
+		// would be miscounted as a permanent phantom waiter. Enough of those
+		// wedge the queue: real requests get pushed past the concurrency limit
+		// and never admit even though no slot is actually occupied.
+		if o.Status.Phase == v1alpha1.GradeRequestPhaseReady || o.Status.Phase == v1alpha1.GradeRequestPhaseFailed {
+			continue
+		}
 		normalizeGradeSpec(&o.Spec)
 		gradable, reason := filterGradableVMs(o.Spec.VMs)
 		if reason != "" {

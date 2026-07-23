@@ -314,6 +314,44 @@ func TestGradeQueuedStatusFields(t *testing.T) {
 	}
 }
 
+// TestGradeTerminalRequestsDoNotBlockQueue is a regression test for the queue
+// wedge: a request that failed before its per-VM statuses were initialized
+// (status.phase=Failed, status.vmStatuses=nil — e.g. failGradeRequest firing
+// because the target VM no longer exists) must not count toward the grading
+// queue. Before the fix, the admission gate classified every spec VM lacking a
+// matching status entry as "waiting", so a pile of such orphans pushed live
+// requests past the concurrency limit and nothing ever admitted despite free
+// slots.
+func TestGradeTerminalRequestsDoNotBlockQueue(t *testing.T) {
+	t.Setenv("GRADE_MAX_CONCURRENT", "1")
+	base := time.Now().Add(-time.Hour)
+
+	// Three orphaned Failed requests, all created before the live one and all
+	// with nil VMStatuses — the reprovision-orphan shape.
+	orphans := make([]*v1alpha1.GradeRequest, 3)
+	for i := range orphans {
+		g := offGradeRequest("grade-orphan-"+string(rune('a'+i)), base.Add(time.Duration(i)*time.Minute))
+		g.Status.Phase = v1alpha1.GradeRequestPhaseFailed
+		g.Status.VMStatuses = nil
+		orphans[i] = g
+	}
+	live := offGradeRequest("grade-live", base.Add(time.Hour))
+
+	r, powered := newGradeQueueReconciler(t, append(orphans, live)...)
+	reconcileGrade(t, r, "grade-live")
+
+	got := getGrade(t, r, "grade-live")
+	if vmQueued(got) {
+		t.Fatalf("live request must not queue behind terminal orphans, got %+v", got.Status.VMStatuses)
+	}
+	if !vmBooted(got) {
+		t.Fatalf("live request should have been admitted and booted, got %+v", got.Status.VMStatuses)
+	}
+	if len(*powered) != 1 {
+		t.Fatalf("powered on %d VMs (%v), want 1", len(*powered), *powered)
+	}
+}
+
 // TestGradeUnlimitedSkipsGate: with no limit set, every VM boots immediately and
 // the gate never lists (no uncached read).
 func TestGradeUnlimitedSkipsGate(t *testing.T) {
