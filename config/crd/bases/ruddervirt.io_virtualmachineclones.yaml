@@ -197,6 +197,19 @@ spec:
                 description: timeout is the maximum duration for the entire clone
                   operation. Defaults to "15m".
                 type: string
+              ttl:
+                description: |-
+                  ttl is the duration after which this clone's VMs become eligible for
+                  watchdog deletion, measured from the resolved age anchor (or, if no
+                  anchor was resolved, from this VirtualMachineClone's creation). When
+                  unset, the controller's configured default TTL applies (CLONE_DEFAULT_TTL
+                  env var, 720h/30d built-in default).
+
+                  Deliberately has no CRD-level default: a schema default would be
+                  materialized onto spec.ttl by the API server at admission time, which
+                  would make the controller's env-configurable default unreachable for
+                  every future clone.
+                type: string
               vmOverrides:
                 description: vmOverrides allows per-VM customization of the cloned
                   VMs.
@@ -386,6 +399,17 @@ spec:
                 description: egressGatewayReady indicates whether the egress gateway
                   is running.
                 type: boolean
+              expiresAt:
+                description: |-
+                  expiresAt is the absolute time this clone's VMs become eligible for
+                  watchdog deletion. Resolved once, in the Pending phase, from
+                  spec.replacesCloneID (inherits the predecessor's own status.expiresAt
+                  verbatim, preserving "delete at the same wall-clock time" even if the
+                  predecessor and this clone have different effective TTLs), or computed
+                  as the resolved age anchor plus the effective TTL. Stamped onto each
+                  cloned VM as the ruddervirt.io/expires-at annotation.
+                format: date-time
+                type: string
               message:
                 description: message is a human-readable summary of the clone state.
                 type: string

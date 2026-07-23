@@ -24,6 +24,19 @@ package v1alpha1
 // originating request. aileron never interprets the value.
 const AnnotationOrigin = "ruddervirt.io/origin"
 
+// AnnotationAgeAnchor overrides a cloned VM's effective creation time for
+// watchdog age checks. Stamped by the clone controller when a
+// VirtualMachineClone inherits its age from a predecessor (see
+// spec.replacesCloneID / spec.ageAnchor).
+const AnnotationAgeAnchor = "ruddervirt.io/age-anchor"
+
+// AnnotationExpiresAt is the absolute RFC3339 timestamp after which a cloned
+// VM is eligible for watchdog deletion (see VirtualMachineCloneStatus.ExpiresAt).
+// Stamped by aileron at VM-creation time; the watchdog treats it as the
+// authoritative, opt-in deletion trigger instead of inferring eligibility
+// from creationTimestamp plus a fleet-wide max age.
+const AnnotationExpiresAt = "ruddervirt.io/expires-at"
+
 // Grade job labels stamp the grader Job (and its pod template) with the
 // GradeRequest name and its target VM/namespace, so the controller can locate a
 // running grade job for a given VM.

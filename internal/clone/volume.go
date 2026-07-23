@@ -353,7 +353,7 @@ func pinBootDiskOrder(vm *unstructured.Unstructured) error {
 }
 
 // ensureVirtualMachine creates a cloned VM in the destination namespace.
-func ensureVirtualMachine(ctx context.Context, c client.Client, templateVM *unstructured.Unstructured, cloneID, cloneNamespace, source string, volumeStates []v1alpha1.CloneVolumeStatus, networkTopo *NetworkTopology, ageAnchor *metav1.Time) error {
+func ensureVirtualMachine(ctx context.Context, c client.Client, templateVM *unstructured.Unstructured, cloneID, cloneNamespace, source string, volumeStates []v1alpha1.CloneVolumeStatus, networkTopo *NetworkTopology, ageAnchor, expiresAt *metav1.Time) error {
 	logger := log.FromContext(ctx)
 	templateVMName := templateVM.GetName()
 	vmShortName := templateVMShortName(templateVM)
@@ -509,7 +509,18 @@ func ensureVirtualMachine(ctx context.Context, c client.Client, templateVM *unst
 		if vmAnn == nil {
 			vmAnn = make(map[string]string)
 		}
-		vmAnn["ruddervirt.io/age-anchor"] = ageAnchor.UTC().Format(time.RFC3339)
+		vmAnn[v1alpha1.AnnotationAgeAnchor] = ageAnchor.UTC().Format(time.RFC3339)
+		vm.SetAnnotations(vmAnn)
+	}
+
+	// Stamp the resolved expiry so the watchdog has an explicit, owner-computed
+	// deletion trigger instead of inferring eligibility from creationTimestamp.
+	if expiresAt != nil {
+		vmAnn := vm.GetAnnotations()
+		if vmAnn == nil {
+			vmAnn = make(map[string]string)
+		}
+		vmAnn[v1alpha1.AnnotationExpiresAt] = expiresAt.UTC().Format(time.RFC3339)
 		vm.SetAnnotations(vmAnn)
 	}
 
@@ -541,10 +552,13 @@ func ensureVirtualMachine(ctx context.Context, c client.Client, templateVM *unst
 // EnsureVMs creates all cloned VMs in the destination namespace. When
 // ageAnchor is non-nil, the resolved RFC3339 timestamp is stamped as the
 // ruddervirt.io/age-anchor annotation on each cloned VM so the watchdog
-// uses it instead of the VM's own creationTimestamp for age checks.
-func EnsureVMs(ctx context.Context, c client.Client, templateVMs []*unstructured.Unstructured, cloneID, cloneNamespace, source string, volumeStates []v1alpha1.CloneVolumeStatus, networkTopo *NetworkTopology, ageAnchor *metav1.Time) error {
+// uses it instead of the VM's own creationTimestamp for age checks. When
+// expiresAt is non-nil, it is stamped as the ruddervirt.io/expires-at
+// annotation — the explicit, opt-in deletion trigger the watchdog prefers
+// over any age-based heuristic.
+func EnsureVMs(ctx context.Context, c client.Client, templateVMs []*unstructured.Unstructured, cloneID, cloneNamespace, source string, volumeStates []v1alpha1.CloneVolumeStatus, networkTopo *NetworkTopology, ageAnchor, expiresAt *metav1.Time) error {
 	for _, vm := range templateVMs {
-		if err := ensureVirtualMachine(ctx, c, vm, cloneID, cloneNamespace, source, volumeStates, networkTopo, ageAnchor); err != nil {
+		if err := ensureVirtualMachine(ctx, c, vm, cloneID, cloneNamespace, source, volumeStates, networkTopo, ageAnchor, expiresAt); err != nil {
 			return err
 		}
 	}

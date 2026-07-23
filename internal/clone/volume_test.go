@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	v1alpha1 "github.com/ruddervirt/aileron/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
@@ -335,7 +336,7 @@ func TestEnsureVirtualMachine_SetsHookAnnotation(t *testing.T) {
 		},
 	}
 
-	err := ensureVirtualMachine(context.Background(), c, templateVM, "ns-clone1", "ruddervirt-system", "test-source", volumeStates, nil, nil)
+	err := ensureVirtualMachine(context.Background(), c, templateVM, "ns-clone1", "ruddervirt-system", "test-source", volumeStates, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -382,7 +383,7 @@ func TestEnsureVirtualMachine_NoHookWithoutEFI(t *testing.T) {
 		},
 	}
 
-	err := ensureVirtualMachine(context.Background(), c, templateVM, "ns-clone2", "ruddervirt-system", "test-source", volumeStates, nil, nil)
+	err := ensureVirtualMachine(context.Background(), c, templateVM, "ns-clone2", "ruddervirt-system", "test-source", volumeStates, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -399,6 +400,80 @@ func TestEnsureVirtualMachine_NoHookWithoutEFI(t *testing.T) {
 	annotations, _, _ := unstructured.NestedStringMap(created.Object, "spec", "template", "metadata", "annotations")
 	if _, ok := annotations["hooks.kubevirt.io/hookSidecars"]; ok {
 		t.Error("hook sidecar annotation should not be set on non-EFI clone VM")
+	}
+}
+
+func TestEnsureVirtualMachine_StampsExpiresAtAnnotation(t *testing.T) {
+	templateVM := makeTemplateVM("vm-build789", "worker", false)
+
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		Build()
+
+	volumeStates := []v1alpha1.CloneVolumeStatus{
+		{
+			VolumeName:                "rootdisk",
+			SourceVMName:              "vm-build789-worker",
+			PersistentVolumeClaimName: "ns-clone3-out-worker",
+		},
+	}
+
+	expiresAt := metav1.NewTime(time.Date(2026, 8, 22, 0, 0, 0, 0, time.UTC))
+	err := ensureVirtualMachine(context.Background(), c, templateVM, "ns-clone3", "ruddervirt-system", "test-source", volumeStates, nil, nil, &expiresAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	created := &unstructured.Unstructured{}
+	created.SetGroupVersionKind(vmGVK)
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name:      "ns-clone3-worker",
+		Namespace: "ruddervirt-system",
+	}, created); err != nil {
+		t.Fatal(err)
+	}
+
+	want := "2026-08-22T00:00:00Z"
+	if got := created.GetAnnotations()[v1alpha1.AnnotationExpiresAt]; got != want {
+		t.Errorf("expires-at annotation = %q, want %q", got, want)
+	}
+}
+
+func TestEnsureVirtualMachine_NoExpiresAtAnnotationWhenNil(t *testing.T) {
+	templateVM := makeTemplateVM("vm-build790", "worker2", false)
+
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		Build()
+
+	volumeStates := []v1alpha1.CloneVolumeStatus{
+		{
+			VolumeName:                "rootdisk",
+			SourceVMName:              "vm-build790-worker2",
+			PersistentVolumeClaimName: "ns-clone4-out-worker2",
+		},
+	}
+
+	err := ensureVirtualMachine(context.Background(), c, templateVM, "ns-clone4", "ruddervirt-system", "test-source", volumeStates, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	created := &unstructured.Unstructured{}
+	created.SetGroupVersionKind(vmGVK)
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name:      "ns-clone4-worker2",
+		Namespace: "ruddervirt-system",
+	}, created); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok := created.GetAnnotations()[v1alpha1.AnnotationExpiresAt]; ok {
+		t.Error("expires-at annotation should not be set when expiresAt is nil")
 	}
 }
 

@@ -233,9 +233,10 @@ func main() {
 		os.Exit(1)
 	}
 	if err := (&controller.VirtualMachineCloneReconciler{
-		Client:     mgr.GetClient(),
-		Scheme:     mgr.GetScheme(),
-		RESTConfig: mgr.GetConfig(),
+		Client:          mgr.GetClient(),
+		Scheme:          mgr.GetScheme(),
+		RESTConfig:      mgr.GetConfig(),
+		DefaultCloneTTL: envDuration("CLONE_DEFAULT_TTL"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "VirtualMachineClone")
 		os.Exit(1)

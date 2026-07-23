@@ -138,6 +138,19 @@ type VirtualMachineCloneSpec struct {
 	// takes priority when the predecessor exists.
 	// +optional
 	AgeAnchor *metav1.Time `json:"ageAnchor,omitempty"`
+
+	// ttl is the duration after which this clone's VMs become eligible for
+	// watchdog deletion, measured from the resolved age anchor (or, if no
+	// anchor was resolved, from this VirtualMachineClone's creation). When
+	// unset, the controller's configured default TTL applies (CLONE_DEFAULT_TTL
+	// env var, 720h/30d built-in default).
+	//
+	// Deliberately has no CRD-level default: a schema default would be
+	// materialized onto spec.ttl by the API server at admission time, which
+	// would make the controller's env-configurable default unreachable for
+	// every future clone.
+	// +optional
+	TTL *metav1.Duration `json:"ttl,omitempty"`
 }
 
 // =============================================================================
@@ -295,6 +308,16 @@ type VirtualMachineCloneStatus struct {
 	// +optional
 	AgeAnchor *metav1.Time `json:"ageAnchor,omitempty"`
 
+	// expiresAt is the absolute time this clone's VMs become eligible for
+	// watchdog deletion. Resolved once, in the Pending phase, from
+	// spec.replacesCloneID (inherits the predecessor's own status.expiresAt
+	// verbatim, preserving "delete at the same wall-clock time" even if the
+	// predecessor and this clone have different effective TTLs), or computed
+	// as the resolved age anchor plus the effective TTL. Stamped onto each
+	// cloned VM as the ruddervirt.io/expires-at annotation.
+	// +optional
+	ExpiresAt *metav1.Time `json:"expiresAt,omitempty"`
+
 	// message is a human-readable summary of the clone state.
 	// +optional
 	Message string `json:"message,omitempty"`
@@ -316,6 +339,7 @@ const (
 	CloneConditionVMProvisioned     = "VMProvisioned"
 	CloneConditionReady             = "Ready"
 	CloneConditionAgeAnchorResolved = "AgeAnchorResolved"
+	CloneConditionExpiryResolved    = "ExpiryResolved"
 )
 
 // +kubebuilder:object:root=true

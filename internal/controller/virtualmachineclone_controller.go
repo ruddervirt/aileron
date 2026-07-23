@@ -45,6 +45,12 @@ import (
 
 const cloneFinalizerName = "ruddervirt.io/clone-finalizer"
 
+// defaultCloneTTL is the built-in fallback TTL used when neither
+// spec.ttl nor DefaultCloneTTL is set. Matches the watchdog's historical
+// default max VM age (30d) so behavior is unchanged on day one of this
+// migration.
+const defaultCloneTTL = 720 * time.Hour
+
 // +kubebuilder:rbac:groups=ruddervirt.io,resources=virtualmachineclones,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=ruddervirt.io,resources=virtualmachineclones/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=ruddervirt.io,resources=virtualmachineclones/finalizers,verbs=update
@@ -61,6 +67,11 @@ type VirtualMachineCloneReconciler struct {
 	Client     client.Client
 	Scheme     *runtime.Scheme
 	RESTConfig *rest.Config
+
+	// DefaultCloneTTL is the fallback TTL applied when a clone doesn't set
+	// spec.ttl. Zero means "use the built-in defaultCloneTTL" (mirrors
+	// PVCReaper.Interval's zero-means-default convention).
+	DefaultCloneTTL time.Duration
 
 	snapshotManager clone.SnapshotManager
 	volumeManager   clone.VolumeManager
@@ -149,6 +160,9 @@ func (r *VirtualMachineCloneReconciler) handlePending(ctx context.Context, vmClo
 
 	if vmClone.Status.AgeAnchor == nil {
 		r.resolveAgeAnchor(ctx, vmClone)
+	}
+	if vmClone.Status.ExpiresAt == nil {
+		r.resolveExpiry(ctx, vmClone)
 	}
 
 	cloneID := vmClone.Status.CloneID
@@ -598,7 +612,7 @@ func (r *VirtualMachineCloneReconciler) handleVMProvisioning(ctx context.Context
 
 	// Create VMs.
 	source := vmClone.GetAnnotations()[v1alpha1.AnnotationOrigin]
-	if err := clone.EnsureVMs(ctx, r.Client, templateVMs, vmClone.Status.CloneID, cloneNS, source, vmClone.Status.VolumeStates, networkTopo, vmClone.Status.AgeAnchor); err != nil {
+	if err := clone.EnsureVMs(ctx, r.Client, templateVMs, vmClone.Status.CloneID, cloneNS, source, vmClone.Status.VolumeStates, networkTopo, vmClone.Status.AgeAnchor, vmClone.Status.ExpiresAt); err != nil {
 		return ctrl.Result{}, fmt.Errorf("creating VMs: %w", err)
 	}
 
@@ -950,6 +964,70 @@ func (r *VirtualMachineCloneReconciler) resolveAgeAnchor(ctx context.Context, vm
 		Status:  metav1.ConditionFalse,
 		Reason:  "NotFound",
 		Message: fmt.Sprintf("predecessor clone with cloneID %q not found and no spec.ageAnchor provided", vmClone.Spec.ReplacesCloneID),
+	})
+}
+
+// resolveExpiry resolves Status.ExpiresAt, the absolute time this clone's VMs
+// become eligible for watchdog deletion. When spec.replacesCloneID names a
+// predecessor that already has its own status.expiresAt set, that value is
+// inherited verbatim rather than recomputed — TTL is per-clone, so recomputing
+// from this clone's own effective TTL could silently change the wall-clock
+// time the predecessor's VMs were meant to die. Otherwise expiry is computed
+// as the resolved age anchor (or, absent one, this clone's start time) plus
+// the effective TTL (spec.ttl, else r.DefaultCloneTTL, else defaultCloneTTL).
+func (r *VirtualMachineCloneReconciler) resolveExpiry(ctx context.Context, vmClone *v1alpha1.VirtualMachineClone) {
+	logger := log.FromContext(ctx)
+
+	if vmClone.Spec.ReplacesCloneID != "" {
+		cloneList := &v1alpha1.VirtualMachineCloneList{}
+		if err := r.Client.List(ctx, cloneList); err != nil {
+			logger.Error(err, "Listing VirtualMachineClones for replacesCloneID expiry lookup", "replacesCloneID", vmClone.Spec.ReplacesCloneID)
+		} else {
+			for i := range cloneList.Items {
+				prev := &cloneList.Items[i]
+				if prev.UID == vmClone.UID || prev.Status.CloneID != vmClone.Spec.ReplacesCloneID {
+					continue
+				}
+				if prev.Status.ExpiresAt != nil {
+					t := *prev.Status.ExpiresAt
+					vmClone.Status.ExpiresAt = &t
+					meta.SetStatusCondition(&vmClone.Status.Conditions, metav1.Condition{
+						Type:    v1alpha1.CloneConditionExpiryResolved,
+						Status:  metav1.ConditionTrue,
+						Reason:  "Inherited",
+						Message: fmt.Sprintf("inherited expiresAt %s from clone %s (cloneID %s)", t.UTC().Format(time.RFC3339), prev.Name, prev.Status.CloneID),
+					})
+					return
+				}
+				break // predecessor found but has no expiresAt (pre-migration); fall through to compute.
+			}
+		}
+	}
+
+	ttl := defaultCloneTTL
+	if r.DefaultCloneTTL > 0 {
+		ttl = r.DefaultCloneTTL
+	}
+	if vmClone.Spec.TTL != nil && vmClone.Spec.TTL.Duration > 0 {
+		ttl = vmClone.Spec.TTL.Duration
+	}
+
+	base := vmClone.Status.StartTime
+	if vmClone.Status.AgeAnchor != nil {
+		base = vmClone.Status.AgeAnchor
+	}
+	if base == nil {
+		now := metav1.Now()
+		base = &now
+	}
+
+	expires := metav1.NewTime(base.Add(ttl))
+	vmClone.Status.ExpiresAt = &expires
+	meta.SetStatusCondition(&vmClone.Status.Conditions, metav1.Condition{
+		Type:    v1alpha1.CloneConditionExpiryResolved,
+		Status:  metav1.ConditionTrue,
+		Reason:  "Computed",
+		Message: fmt.Sprintf("expiresAt = %s (base %s + ttl %s)", expires.UTC().Format(time.RFC3339), base.UTC().Format(time.RFC3339), ttl),
 	})
 }
 
