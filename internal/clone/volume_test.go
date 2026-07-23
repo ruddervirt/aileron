@@ -265,6 +265,18 @@ func TestRewireVMVolumes_IgnoresEFIVars(t *testing.T) {
 	}
 }
 
+// findVolumeState returns the volume state matching name by value, rather
+// than handing back a pointer into the slice — this keeps callers on plain
+// value semantics instead of aliasing loop-scoped addresses.
+func findVolumeState(states []v1alpha1.CloneVolumeStatus, name string) (v1alpha1.CloneVolumeStatus, bool) {
+	for i := range states {
+		if states[i].VolumeName == name {
+			return states[i], true
+		}
+	}
+	return v1alpha1.CloneVolumeStatus{}, false
+}
+
 func makeTemplateVM(buildID, vmShortName string, withEFI bool) *unstructured.Unstructured {
 	vmName := buildID + "-" + vmShortName
 	vm := &unstructured.Unstructured{
@@ -552,24 +564,16 @@ func TestBuildInitialVolumeStates_DetectsEFIPVC(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var rootState, efiState *v1alpha1.CloneVolumeStatus
-	for i := range states {
-		switch states[i].VolumeName {
-		case "rootdisk":
-			rootState = &states[i]
-		case EFIVarsVolumeName:
-			efiState = &states[i]
-		}
-	}
-
-	if rootState == nil {
+	rootState, ok := findVolumeState(states, "rootdisk")
+	if !ok {
 		t.Fatal("rootdisk volume state not found")
 	}
 	if rootState.SourcePVCName != "vm-build789-out-module" {
 		t.Errorf("rootdisk PVC = %s, want vm-build789-out-module", rootState.SourcePVCName)
 	}
 
-	if efiState == nil {
+	efiState, ok := findVolumeState(states, EFIVarsVolumeName)
+	if !ok {
 		t.Fatal("efivars volume state not found")
 	}
 	if efiState.SourcePVCName != "vm-build789-module-efivars" {
