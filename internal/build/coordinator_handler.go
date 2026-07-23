@@ -180,11 +180,16 @@ func (h *CoordinatorHandler) buildConfig(ctx context.Context, vmBuild *v1alpha1.
 	if username == "" {
 		username = "root"
 	}
+	sshTimeout := ""
+	if vmSpec.Communicator.SSHTimeout != nil {
+		sshTimeout = vmSpec.Communicator.SSHTimeout.Duration.String()
+	}
 	cfg.Communicator = CoordinatorCommunicator{
-		Shell:    shell,
-		Username: username,
-		Port:     vmSpec.Communicator.SSHPort,
-		Password: vmSpec.Communicator.SSHPassword,
+		Shell:      shell,
+		Username:   username,
+		Port:       vmSpec.Communicator.SSHPort,
+		Password:   vmSpec.Communicator.SSHPassword,
+		SSHTimeout: sshTimeout,
 	}
 
 	// Provisioners — pre-resolve all content.

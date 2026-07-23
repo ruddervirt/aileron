@@ -79,6 +79,11 @@ type CoordinatorCommunicator struct {
 	Port     int32  `json:"port"`
 	Password string `json:"password,omitempty"`
 	// PrivateKey is read from a mounted Secret volume, not from config.
+
+	// SSHTimeout is how long to wait for SSH to become available before
+	// failing, as a Go duration string (e.g. "5m"). Empty means use the
+	// coordinator's default.
+	SSHTimeout string `json:"sshTimeout,omitempty"`
 }
 
 // CoordinatorStatus is the JSON status written by the coordinator pod to a

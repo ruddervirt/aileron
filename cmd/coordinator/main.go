@@ -35,6 +35,10 @@ const (
 	sshRetryInterval   = 15 * time.Second
 	rebootPollInterval = 5 * time.Second
 
+	// defaultSSHTimeout is how long waitForSSH waits for SSH to become
+	// available when the VM spec doesn't set an explicit sshTimeout.
+	defaultSSHTimeout = 5 * time.Minute
+
 	// rebootPerCallTimeout bounds each TrySSH/getBootTime/RunCommand so a
 	// half-dead SSH session during shutdown can't hang the poll loop forever.
 	// ExecConn.SetReadDeadline is a no-op, so without a per-call ctx deadline
@@ -167,6 +171,15 @@ func runProvisioners(ctx context.Context, buildName string, cfg *build.Coordinat
 		shell = v1alpha1.ShellTypeBash
 	}
 
+	sshTimeout := defaultSSHTimeout
+	if cfg.Communicator.SSHTimeout != "" {
+		d, parseErr := time.ParseDuration(cfg.Communicator.SSHTimeout)
+		if parseErr != nil {
+			return fmt.Errorf("invalid communicator sshTimeout %q: %w", cfg.Communicator.SSHTimeout, parseErr)
+		}
+		sshTimeout = d
+	}
+
 	// Read SSH private key from mounted secret if available.
 	var privateKey []byte
 	if keyPath := envOr("SSH_KEY_PATH", "/etc/coordinator/ssh/id"); fileExists(keyPath) {
@@ -227,7 +240,7 @@ func runProvisioners(ctx context.Context, buildName string, cfg *build.Coordinat
 		cur.SSHWaitMessage = msg
 		writeStatus(ctx, k8sClient, ns, statusCM, *cur)
 	}
-	if err := waitForSSH(ctx, buildName, comm, setSSHMsg); err != nil {
+	if err := waitForSSH(ctx, buildName, comm, sshTimeout, setSSHMsg); err != nil {
 		return fmt.Errorf("waiting for SSH: %w", err)
 	}
 	logInfo(buildName, "SSH communicator ready")
@@ -256,7 +269,7 @@ func runProvisioners(ctx context.Context, buildName string, cfg *build.Coordinat
 		// Ensure SSH is up before each step. A previous step (or even a
 		// non-reboot shell command) may have triggered a reboot.
 		if step.Type != stepTypeReboot && step.Type != stepTypeWindowsUpdate && step.Type != stepTypeHandbuild {
-			if err := waitForSSH(ctx, buildName, comm, setSSHMsg); err != nil {
+			if err := waitForSSH(ctx, buildName, comm, sshTimeout, setSSHMsg); err != nil {
 				return fmt.Errorf("waiting for SSH before step %d: %w", i, err)
 			}
 		}
@@ -289,7 +302,7 @@ func runProvisioners(ctx context.Context, buildName string, cfg *build.Coordinat
 		case "file":
 			stepErr = runFileStep(stepCtx, buildName, comm, step.File)
 		case stepTypeReboot:
-			stepErr = runRebootStep(stepCtx, buildName, comm, step.Reboot)
+			stepErr = runRebootStep(stepCtx, buildName, comm, sshTimeout, step.Reboot)
 		case stepTypeWindowsUpdate:
 			stepErr = runWindowsUpdateStep(stepCtx, buildName, comm, step.WindowsUpdate)
 		case stepTypeHandbuild:
@@ -565,10 +578,11 @@ func runFileStep(
 }
 
 func runRebootStep(
-	ctx context.Context, buildName string, comm *build.SSHCommunicator, step *build.CoordinatorRebootStep,
+	ctx context.Context, buildName string, comm *build.SSHCommunicator, sshTimeout time.Duration,
+	step *build.CoordinatorRebootStep,
 ) error {
 	// Wait for SSH so we can query boot time and send reboot.
-	if err := waitForSSH(ctx, buildName, comm, nil); err != nil {
+	if err := waitForSSH(ctx, buildName, comm, sshTimeout, nil); err != nil {
 		return err
 	}
 
@@ -896,19 +910,30 @@ func getBootTime(ctx context.Context, comm *build.SSHCommunicator) (string, erro
 	return strings.TrimSpace(out), nil
 }
 
-// waitForSSH blocks until the VM accepts an SSH handshake.
+// waitForSSH blocks until the VM accepts an SSH handshake, or until timeout
+// elapses. Authentication failures are retried the same as any other error
+// instead of failing fast — a provisioner step run through a different path
+// (e.g. handbuild) may still fix the credentials before timeout is reached.
 // setWaitMessage, if non-nil, is invoked with a non-empty category string when
 // the failure is actionable (authentication rejected) and with "" once SSH
 // succeeds. Transient pre-boot errors (connection refused / timeout) are not
 // reported through the callback to avoid spamming status during normal boot.
-func waitForSSH(ctx context.Context, buildName string, comm *build.SSHCommunicator, setWaitMessage func(string)) error {
+func waitForSSH(
+	ctx context.Context, buildName string, comm *build.SSHCommunicator, timeout time.Duration,
+	setWaitMessage func(string),
+) error {
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	var lastErr error
 	for {
-		if err := comm.TrySSH(ctx); err == nil {
+		if err := comm.TrySSH(waitCtx); err == nil {
 			if setWaitMessage != nil {
 				setWaitMessage("")
 			}
 			return nil
 		} else {
+			lastErr = err
 			category := sshErrorCategory(err)
 			logInfo(buildName, category, "error", err.Error())
 			if setWaitMessage != nil && strings.Contains(err.Error(), "unable to authenticate") {
@@ -916,8 +941,11 @@ func waitForSSH(ctx context.Context, buildName string, comm *build.SSHCommunicat
 			}
 		}
 		select {
-		case <-ctx.Done():
-			return ctx.Err()
+		case <-waitCtx.Done():
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return fmt.Errorf("timed out after %s waiting for SSH: %w", timeout, lastErr)
 		case <-time.After(sshRetryInterval):
 		}
 	}
