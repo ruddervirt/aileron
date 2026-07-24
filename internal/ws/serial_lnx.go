@@ -13,7 +13,6 @@ import (
 )
 
 const (
-	linuxPromptMaxAttempts    = 3
 	linuxInitialWakeDelay     = 1 * time.Second
 	linuxPostCommandWakeDelay = 5 * time.Second
 )
@@ -68,7 +67,7 @@ func RunCommandsWithRudderGradeLinux(wsConn *websocket.Conn, username, password,
 		return failf("failed to send ruddergrade command: %v", err)
 	}
 
-	outputWithPrompt, promptMatches, err := waitForLinuxPrompt(console, 90*time.Second, linuxPostCommandWakeDelay, linuxPromptMaxAttempts)
+	outputWithPrompt, promptMatches, err := waitForLinuxPrompt(console, 90*time.Second, linuxPostCommandWakeDelay)
 	if err != nil {
 		return failErr(err)
 	}
@@ -107,7 +106,7 @@ func RunCommandsWithRudderGradeLinux(wsConn *websocket.Conn, username, password,
 // waitForLinuxShell gets the console to a shell prompt, logging in first if
 // the VM is sitting at a login screen.
 func waitForLinuxShell(console *wsConsole, username, password string) error {
-	segment, _, err := waitForPromptWithRegex(console, linuxPromptOrLoginRe, 10*time.Second, linuxInitialWakeDelay, linuxPromptMaxAttempts)
+	segment, _, err := waitForPromptWithRegex(console, linuxPromptOrLoginRe, 10*time.Second, linuxInitialWakeDelay)
 	if err != nil {
 		return err
 	}
@@ -140,38 +139,48 @@ func waitForLinuxShell(console *wsConsole, username, password string) error {
 		return fmt.Errorf("failed to send post-login newline: %w", err)
 	}
 
-	if _, _, err := waitForLinuxPrompt(console, 15*time.Second, linuxPostCommandWakeDelay, linuxPromptMaxAttempts); err != nil {
+	if _, _, err := waitForLinuxPrompt(console, 15*time.Second, linuxPostCommandWakeDelay); err != nil {
 		return fmt.Errorf("failed to get shell prompt after login: %w", err)
 	}
 
 	return nil
 }
 
-func waitForLinuxPrompt(console *wsConsole, totalTimeout, wakeDelay time.Duration, maxAttempts int) (string, []string, error) {
-	return waitForPromptWithRegex(console, linuxPromptRe, totalTimeout, wakeDelay, maxAttempts)
+func waitForLinuxPrompt(console *wsConsole, totalTimeout, wakeDelay time.Duration) (string, []string, error) {
+	return waitForPromptWithRegex(console, linuxPromptRe, totalTimeout, wakeDelay)
 }
 
-func waitForPromptWithRegex(console *wsConsole, re *regexp.Regexp, totalTimeout, wakeDelay time.Duration, maxAttempts int) (string, []string, error) {
-	if maxAttempts < 1 {
-		maxAttempts = 1
-	}
+// waitForPromptWithRegex polls for re to match, waking the console with a
+// newline every wakeDelay if it hasn't, until totalTimeout has elapsed. The
+// loop is bounded by the deadline, not by an attempt count, so it always
+// actually spends the full totalTimeout budget the caller asked for.
+func waitForPromptWithRegex(console *wsConsole, re *regexp.Regexp, totalTimeout, wakeDelay time.Duration) (string, []string, error) {
 	deadline := time.Now().Add(totalTimeout)
 	if wakeDelay <= 0 || wakeDelay > totalTimeout {
 		wakeDelay = totalTimeout
 	}
 
 	var lastErr error
-	currentDelay := wakeDelay
+	first := true
 
-	for attempt := 0; attempt < maxAttempts; attempt++ {
+	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
 			break
 		}
 
-		if currentDelay > remaining {
-			currentDelay = remaining
+		if !first {
+			if err := console.send("\n"); err != nil {
+				return "", nil, fmt.Errorf("failed to send wake newline: %w", err)
+			}
+			remaining = time.Until(deadline)
+			if remaining <= 0 {
+				break
+			}
 		}
+		first = false
+
+		currentDelay := min(wakeDelay, remaining)
 
 		segment, matches, err := console.expectRegex(re, currentDelay)
 		if err == nil {
@@ -183,21 +192,6 @@ func waitForPromptWithRegex(console *wsConsole, re *regexp.Regexp, totalTimeout,
 		}
 
 		lastErr = err
-
-		if attempt == maxAttempts-1 {
-			break
-		}
-
-		if err := console.send("\n"); err != nil {
-			return "", nil, fmt.Errorf("failed to send wake newline: %w", err)
-		}
-
-		rest := time.Until(deadline)
-		if rest <= 0 {
-			break
-		}
-
-		currentDelay = min(linuxPostCommandWakeDelay, rest)
 	}
 
 	if lastErr != nil {

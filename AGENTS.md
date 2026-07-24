@@ -24,6 +24,8 @@
 - **VirtualMachineNamespace** — Internal bookkeeping CR (one per build, tracks the buildID)
 - **GradeRequest** — Runs per-VM commands over the KubeVirt serial console and records results (grading method resolved from the VM's `ruddervirt.io/os` label); reconciler built into the core manager
 
+End-user authoring reference (field semantics, examples, label conventions): [`docs/end-user-documentation.md`](docs/end-user-documentation.md).
+
 ### Resource Naming
 
 All resources for a build use `{buildID}-` prefix `vm-`. All resources for a clone use `{cloneID}-` prefix `ns-`.
@@ -79,3 +81,7 @@ up on the next build. CRDs are shipped by the Helm chart (not `kubectl apply`) �
 the chart's `templates/crds/` directory mirrors `config/crd/bases/` (controller-gen
 output). When adding a new CRD, put the type in `./api/` or `./internal/` and
 `make generate` picks it up.
+
+`docs/end-user-documentation.md` is hand-maintained prose, not generated — there's no
+`make verify-crds`-style drift check for it. A user-visible spec/status field
+change should prompt a check of the matching section in that doc.

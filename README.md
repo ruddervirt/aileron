@@ -45,6 +45,11 @@ A Kubernetes operator for building repeatable "modules" of VMs. Aileron automate
 4. A new KubeOVN VPC and subnet are created (derived from the template's topology)
 5. Running VMs are created with the cloned disks and new network
 
+## Documentation
+
+- [End-user documentation](docs/end-user-documentation.md) — how to write `VirtualMachineBuild`, `VirtualMachineClone`, and `GradeRequest` manifests, plus the label/status conventions that tie them together. Start here to build/clone/grade VMs programmatically.
+- [VNC console architecture](docs/vncgateway.md) — how console viewing works under the hood.
+
 ## Developing
 
 ```bash
