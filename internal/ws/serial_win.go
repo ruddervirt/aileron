@@ -126,36 +126,6 @@ func RunCommandsWithRudderGrade(wsConn *websocket.Conn, username, password, doma
 
 	errChannelUnavailable := fmt.Errorf("command channel unavailable")
 
-	captureChannel := func() (string, error) {
-		for range 6 {
-			segment, matches, err := console.expectRegex(channelRe, 20*time.Second)
-			if err == nil {
-				candidate := strings.TrimSpace(matches[1])
-				lowerSegment := strings.ToLower(segment)
-				if strings.Contains(lowerSegment, "a channel has been closed") && !strings.Contains(lowerSegment, "a new channel has been created") {
-					continue
-				}
-				return candidate, nil
-			}
-
-			if !isTimeoutError(err) {
-				return "", err
-			}
-
-			if _, _, err := console.expectRegex(unableCmdRe, 2*time.Second); err != nil {
-				if isTimeoutError(err) {
-					return "", fmt.Errorf("cmd failed to produce a command channel")
-				}
-				return "", err
-			}
-
-			if _, _, err := console.expectRegex(cmdAvailableRe, 30*time.Second); err != nil {
-				return "", err
-			}
-		}
-		return "", fmt.Errorf("failed to identify command channel after retries")
-	}
-
 	switchChannel := func(name string) error {
 		if err := console.send(fmt.Sprintf("ch -sn %s\r", name)); err != nil {
 			return fmt.Errorf("failed to switch to channel %s: %w", name, err)
@@ -192,7 +162,7 @@ func RunCommandsWithRudderGrade(wsConn *websocket.Conn, username, password, doma
 			return failf("failed to send cmd: %v", err)
 		}
 
-		name, err := captureChannel()
+		name, err := captureCommandChannel(console, channelRe, unableCmdRe, cmdAvailableRe, 20*time.Second, 2*time.Second, 30*time.Second)
 		if err != nil {
 			return failErr(err)
 		}
@@ -412,4 +382,44 @@ func RunCommandsWithRudderGrade(wsConn *websocket.Conn, username, password, doma
 	}
 
 	return response.Results, nil
+}
+
+// captureCommandChannel waits for SAC to report the Cmd channel created by a
+// "cmd" command the caller already sent. If the CMD service hasn't
+// registered yet, SAC rejects that "cmd" and later emits an
+// "EVENT: The CMD command is now available" line once it has - but it does
+// not retry the original invocation itself, so we have to resend "cmd" at
+// that point or the channel will never appear.
+func captureCommandChannel(console *wsConsole, channelRe, unableCmdRe, cmdAvailableRe *regexp.Regexp, channelTimeout, unableCmdCheckTimeout, cmdAvailableTimeout time.Duration) (string, error) {
+	for range 6 {
+		segment, matches, err := console.expectRegex(channelRe, channelTimeout)
+		if err == nil {
+			candidate := strings.TrimSpace(matches[1])
+			lowerSegment := strings.ToLower(segment)
+			if strings.Contains(lowerSegment, "a channel has been closed") && !strings.Contains(lowerSegment, "a new channel has been created") {
+				continue
+			}
+			return candidate, nil
+		}
+
+		if !isTimeoutError(err) {
+			return "", err
+		}
+
+		if _, _, err := console.expectRegex(unableCmdRe, unableCmdCheckTimeout); err != nil {
+			if isTimeoutError(err) {
+				return "", fmt.Errorf("cmd failed to produce a command channel")
+			}
+			return "", err
+		}
+
+		if _, _, err := console.expectRegex(cmdAvailableRe, cmdAvailableTimeout); err != nil {
+			return "", err
+		}
+
+		if err := console.send("cmd\r"); err != nil {
+			return "", fmt.Errorf("failed to resend cmd after service became available: %w", err)
+		}
+	}
+	return "", fmt.Errorf("failed to identify command channel after retries")
 }
