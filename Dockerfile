@@ -1,5 +1,5 @@
 # Build the manager binary
-FROM golang:1.26.2@sha256:b54cbf583d390341599d7bcbc062425c081105cc5ef6d170ced98ef9d047c716 AS builder
+FROM golang:1.26.5@sha256:3aff6657219a4d9c14e27fb1d8976c49c29fddb70ba835014f477e1c70636647 AS builder
 WORKDIR /workspace
 
 # Cache dependencies
@@ -22,7 +22,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -o ma
  && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -o grader cmd/grader/main.go
 
 # Aileron runtime
-FROM gcr.io/distroless/static:nonroot@sha256:963fa6c544fe5ce420f1f54fb88b6fb01479f054c8056d0f74cc2c6000df5240 AS manager
+FROM gcr.io/distroless/static:nonroot@sha256:f7f8f729987ad0fdf6b05eeeae94b26e6a0f613bdf46feea7fc40f7bd72953e6 AS manager
 LABEL org.opencontainers.image.source="https://github.com/ruddervirt/aileron"
 WORKDIR /
 COPY --from=builder /workspace/manager .
@@ -32,14 +32,14 @@ ENTRYPOINT ["/manager"]
 
 # Grader worker — aileron core (runs in per-VM grading Jobs scheduled by the
 # GradeRequest reconciler; connects to the VM's KubeVirt serial console).
-FROM gcr.io/distroless/static:nonroot@sha256:963fa6c544fe5ce420f1f54fb88b6fb01479f054c8056d0f74cc2c6000df5240 AS grader
+FROM gcr.io/distroless/static:nonroot@sha256:f7f8f729987ad0fdf6b05eeeae94b26e6a0f613bdf46feea7fc40f7bd72953e6 AS grader
 LABEL org.opencontainers.image.source="https://github.com/ruddervirt/aileron"
 COPY --from=builder /workspace/grader /grader
 USER 65532:65532
 ENTRYPOINT ["/grader"]
 
 # VNC bridge — aileron core (TCP <-> KubeVirt VNC WebSocket tunnels for guacd)
-FROM gcr.io/distroless/static:nonroot@sha256:963fa6c544fe5ce420f1f54fb88b6fb01479f054c8056d0f74cc2c6000df5240 AS vncgateway
+FROM gcr.io/distroless/static:nonroot@sha256:f7f8f729987ad0fdf6b05eeeae94b26e6a0f613bdf46feea7fc40f7bd72953e6 AS vncgateway
 LABEL org.opencontainers.image.source="https://github.com/ruddervirt/aileron"
 COPY --from=builder /workspace/vncgateway /vncgateway
 USER 65532:65532
@@ -47,14 +47,14 @@ ENTRYPOINT ["/vncgateway"]
 
 # aileron-ui — basic web interface (builds/clones submission, status, consoles).
 # Static frontend assets are embedded in the binary via go:embed.
-FROM gcr.io/distroless/static:nonroot@sha256:963fa6c544fe5ce420f1f54fb88b6fb01479f054c8056d0f74cc2c6000df5240 AS aileron-ui
+FROM gcr.io/distroless/static:nonroot@sha256:f7f8f729987ad0fdf6b05eeeae94b26e6a0f613bdf46feea7fc40f7bd72953e6 AS aileron-ui
 LABEL org.opencontainers.image.source="https://github.com/ruddervirt/aileron"
 COPY --from=builder /workspace/aileron-ui /aileron-ui
 USER 65532:65532
 ENTRYPOINT ["/aileron-ui"]
 
 # Coordinator (boot commands + provisioning)
-FROM gcr.io/distroless/static:nonroot@sha256:963fa6c544fe5ce420f1f54fb88b6fb01479f054c8056d0f74cc2c6000df5240 AS coordinator
+FROM gcr.io/distroless/static:nonroot@sha256:f7f8f729987ad0fdf6b05eeeae94b26e6a0f613bdf46feea7fc40f7bd72953e6 AS coordinator
 LABEL org.opencontainers.image.source="https://github.com/ruddervirt/aileron"
 COPY --from=builder /workspace/coordinator /coordinator
 USER 65532:65532
