@@ -238,6 +238,13 @@ type ClonedVMStatus struct {
 	// message provides human-readable status.
 	// +optional
 	Message string `json:"message,omitempty"`
+
+	// invisible indicates this VM is excluded from the console/VNC-access UI,
+	// inherited from the template's BuildVM.invisible via the
+	// ruddervirt.io/invisible annotation on the template VM. Clones cannot
+	// override this.
+	// +optional
+	Invisible bool `json:"invisible,omitempty"`
 }
 
 // CloneNetworkStatus records the state of the clone's network resources.

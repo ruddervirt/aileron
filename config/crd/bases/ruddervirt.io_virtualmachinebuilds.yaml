@@ -663,6 +663,14 @@ spec:
                       required:
                       - files
                       type: object
+                    invisible:
+                      description: |-
+                        invisible excludes this VM from the console/VNC-access UI — for the
+                        build itself and for every clone made from its template. Grading,
+                        networking, and provisioning are unaffected. Clones cannot override
+                        this; a clone always inherits invisibility from its template (see
+                        VMOverride, which intentionally has no equivalent field).
+                      type: boolean
                     isos:
                       description: |-
                         isos defines ISO images to attach as cdrom devices.

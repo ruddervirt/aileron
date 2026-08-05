@@ -584,7 +584,10 @@ func CheckVMsReady(ctx context.Context, c client.Client, templateVMs []*unstruct
 				templateVM.GetName(), LabelVMName)
 		}
 		vmName := CloneVMName(cloneID, vmShortName)
-		status := v1alpha1.ClonedVMStatus{Name: vmName}
+		status := v1alpha1.ClonedVMStatus{
+			Name:      vmName,
+			Invisible: templateVM.GetAnnotations()[v1alpha1.AnnotationInvisible] == annotationTrue,
+		}
 
 		vm := &unstructured.Unstructured{}
 		vm.SetGroupVersionKind(vmGVK)

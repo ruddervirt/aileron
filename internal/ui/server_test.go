@@ -86,6 +86,96 @@ func TestListBuildsProjectsConsoles(t *testing.T) {
 	}
 }
 
+// TestListBuildsExcludesInvisibleVMFromConsoles checks that a VM whose
+// spec.vms[].invisible is true gets no console entry, while still showing
+// up in the per-VM provisioner status.
+func TestListBuildsExcludesInvisibleVMFromConsoles(t *testing.T) {
+	build := &v1alpha1.VirtualMachineBuild{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-invisible", Namespace: "ruddervirt-system"},
+		Spec: v1alpha1.VirtualMachineBuildSpec{
+			VMs: []v1alpha1.BuildVM{
+				{Name: "client", Source: v1alpha1.BuildSource{Blank: true}},
+				{Name: "webserver", Source: v1alpha1.BuildSource{Blank: true}, Invisible: true},
+			},
+		},
+		Status: v1alpha1.VirtualMachineBuildStatus{
+			Phase:          "Building",
+			BuildID:        "vm-abc123",
+			BuildNamespace: "vm-abc123",
+			VMStatuses: []v1alpha1.VMBuildStatus{
+				{Name: "client", VMName: "vm-abc123-client"},
+				{Name: "webserver", VMName: "vm-abc123-webserver"},
+			},
+		},
+	}
+	ts := newTestServer(t, build)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/api/builds")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	var views []buildView
+	if err := json.NewDecoder(resp.Body).Decode(&views); err != nil {
+		t.Fatal(err)
+	}
+	if len(views) != 1 {
+		t.Fatalf("got %d builds, want 1", len(views))
+	}
+	if len(views[0].Consoles) != 1 {
+		t.Fatalf("got %d consoles, want 1 (invisible VM excluded)", len(views[0].Consoles))
+	}
+	if views[0].Consoles[0].VMName != "client" {
+		t.Errorf("console VM = %q, want client", views[0].Consoles[0].VMName)
+	}
+	if len(views[0].VMs) != 2 {
+		t.Errorf("got %d vms, want 2 — invisible VM should still appear in provisioner status", len(views[0].VMs))
+	}
+}
+
+// TestListClonesExcludesInvisibleVMFromConsoles checks that a cloned VM whose
+// ClonedVMStatus.Invisible is true (inherited from its template) gets no
+// console entry.
+func TestListClonesExcludesInvisibleVMFromConsoles(t *testing.T) {
+	clone := &v1alpha1.VirtualMachineClone{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-clone", Namespace: "ruddervirt-system"},
+		Spec:       v1alpha1.VirtualMachineCloneSpec{TemplateName: "module"},
+		Status: v1alpha1.VirtualMachineCloneStatus{
+			Phase:          "Ready",
+			CloneID:        "ns-abc123",
+			CloneNamespace: "ns-abc123",
+			VMStatuses: []v1alpha1.ClonedVMStatus{
+				{Name: "ns-abc123-client", Ready: true},
+				{Name: "ns-abc123-webserver", Ready: true, Invisible: true},
+			},
+		},
+	}
+	ts := newTestServer(t, clone)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/api/clones")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	var views []cloneView
+	if err := json.NewDecoder(resp.Body).Decode(&views); err != nil {
+		t.Fatal(err)
+	}
+	if len(views) != 1 {
+		t.Fatalf("got %d clones, want 1", len(views))
+	}
+	if len(views[0].Consoles) != 1 {
+		t.Fatalf("got %d consoles, want 1 (invisible VM excluded)", len(views[0].Consoles))
+	}
+	if views[0].Consoles[0].VMName != "ns-abc123-client" {
+		t.Errorf("console VM = %q, want ns-abc123-client", views[0].Consoles[0].VMName)
+	}
+}
+
 // TestBuildProvisionerStatus checks per-VM provisioner results are projected
 // into the build view.
 func TestBuildProvisionerStatus(t *testing.T) {

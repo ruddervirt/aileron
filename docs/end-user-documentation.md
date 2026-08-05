@@ -129,6 +129,7 @@ off of.
 | `ruddervirt.io/age-anchor` | Effective creation time used for watchdog age checks (see [TTL & expiry](#ttl--expiry-model)) | Cloned VMs |
 | `ruddervirt.io/expires-at` | Absolute RFC3339 timestamp a cloned VM becomes eligible for watchdog deletion | Cloned VMs |
 | `ruddervirt.io/grade-request`, `-target-vm`, `-target-namespace` | Identify which `GradeRequest` and target VM a grader Job belongs to | Grader Jobs |
+| `ruddervirt.io/invisible` | Set to `"true"` when the source `BuildVM`'s `invisible` is true; excludes the VM from the console/VNC UI | VMs, templates, and clones, when the source `spec.vms[].invisible` is `true` |
 
 ### Status contract
 
@@ -254,6 +255,13 @@ next starts:
 `checksum` (or the URL's hash if omitted) and shared across builds. `floppy`
 attaches a disk built from named `spec.files[]` entries — useful for Windows
 `Autounattend.xml`/sysprep or BIOS-era boot configuration.
+
+**Invisible VMs** — `spec.vms[].invisible` (default `false`) excludes a VM
+from the console/VNC-access UI, for the build itself and for every clone made
+from its template. Use it for infrastructure VMs nobody should click into
+(e.g. a webserver just serving a page, a DC/DNS box) — grading, networking,
+and provisioning are unaffected. Clones cannot override it; a clone always
+inherits invisibility from its template.
 
 **Files** (`spec.files[]`) — named blobs (`inline` or `url`), referenced by
 name from `httpDirectory`, `floppy`, or a `file` provisioner's `fileRef`. The

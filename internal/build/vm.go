@@ -390,6 +390,9 @@ func (v *VMBooter) buildVM(build *v1alpha1.VirtualMachineBuild, vmSpec *v1alpha1
 	if source != "" {
 		vmAnnotations[v1alpha1.AnnotationOrigin] = source
 	}
+	if vmSpec.Invisible {
+		vmAnnotations[v1alpha1.AnnotationInvisible] = valueTrue
+	}
 
 	vm := &unstructured.Unstructured{
 		Object: map[string]any{

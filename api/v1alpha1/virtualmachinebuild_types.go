@@ -158,6 +158,14 @@ type BuildVM struct {
 	// floppy attaches a floppy disk containing files from spec.files.
 	// +optional
 	Floppy *Floppy `json:"floppy,omitempty"`
+
+	// invisible excludes this VM from the console/VNC-access UI — for the
+	// build itself and for every clone made from its template. Grading,
+	// networking, and provisioning are unaffected. Clones cannot override
+	// this; a clone always inherits invisibility from its template (see
+	// VMOverride, which intentionally has no equivalent field).
+	// +optional
+	Invisible bool `json:"invisible,omitempty"`
 }
 
 // EFIFirmware configures UEFI boot with custom OVMF firmware files.

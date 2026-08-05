@@ -160,6 +160,13 @@ func projectBuild(b *v1alpha1.VirtualMachineBuild) buildView {
 		Consoles:       []consoleTarget{},
 		VMs:            []buildVMView{},
 	}
+	invisible := make(map[string]bool, len(b.Spec.VMs))
+	for _, vmSpec := range b.Spec.VMs {
+		if vmSpec.Invisible {
+			invisible[vmSpec.Name] = true
+		}
+	}
+
 	ns := b.Status.BuildNamespace
 	for _, vm := range b.Status.VMStatuses {
 		// vmName is the live KubeVirt VM/VMI name; fall back to the
@@ -168,7 +175,7 @@ func projectBuild(b *v1alpha1.VirtualMachineBuild) buildView {
 		if vmi == "" && b.Status.BuildID != "" {
 			vmi = b.Status.BuildID + "-" + vm.Name
 		}
-		if ns != "" && vmi != "" {
+		if ns != "" && vmi != "" && !invisible[vm.Name] {
 			v.Consoles = append(v.Consoles, consoleTarget{VMName: vm.Name, Namespace: ns, VMI: vmi})
 		}
 
@@ -254,7 +261,7 @@ func projectClone(c *v1alpha1.VirtualMachineClone) cloneView {
 	}
 	ns := c.Status.CloneNamespace
 	for _, vm := range c.Status.VMStatuses {
-		if ns == "" || vm.Name == "" {
+		if ns == "" || vm.Name == "" || vm.Invisible {
 			continue
 		}
 		// ClonedVMStatus.Name is the cloned VM's name in the clone namespace,

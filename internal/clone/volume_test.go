@@ -489,6 +489,103 @@ func TestEnsureVirtualMachine_NoExpiresAtAnnotationWhenNil(t *testing.T) {
 	}
 }
 
+func TestEnsureVirtualMachine_CarriesInvisibleAnnotation(t *testing.T) {
+	templateVM := makeTemplateVM("vm-build800", "webserver", false)
+	templateVM.SetAnnotations(map[string]string{v1alpha1.AnnotationInvisible: annotationTrue})
+
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		Build()
+
+	volumeStates := []v1alpha1.CloneVolumeStatus{
+		{
+			VolumeName:                "rootdisk",
+			SourceVMName:              "vm-build800-webserver",
+			PersistentVolumeClaimName: "ns-clone5-out-webserver",
+		},
+	}
+
+	err := ensureVirtualMachine(context.Background(), c, templateVM, "ns-clone5", "ruddervirt-system", "test-source", volumeStates, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	created := &unstructured.Unstructured{}
+	created.SetGroupVersionKind(vmGVK)
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name:      "ns-clone5-webserver",
+		Namespace: "ruddervirt-system",
+	}, created); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := created.GetAnnotations()[v1alpha1.AnnotationInvisible]; got != annotationTrue {
+		t.Errorf("invisible annotation = %q, want %q", got, annotationTrue)
+	}
+}
+
+func TestCheckVMsReady_PopulatesInvisibleFromTemplate(t *testing.T) {
+	visibleTemplate := makeTemplateVM("vm-build900", "app", false)
+	invisibleTemplate := makeTemplateVM("vm-build900", "webserver", false)
+	invisibleTemplate.SetAnnotations(map[string]string{v1alpha1.AnnotationInvisible: annotationTrue})
+
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		Build()
+
+	statuses, allReady, err := CheckVMsReady(context.Background(), c, []*unstructured.Unstructured{visibleTemplate, invisibleTemplate}, "ns-clone6", "ruddervirt-system")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if allReady {
+		t.Error("allReady should be false — neither clone VM was created")
+	}
+
+	byName := make(map[string]v1alpha1.ClonedVMStatus, len(statuses))
+	for _, s := range statuses {
+		byName[s.Name] = s
+	}
+
+	if s := byName["ns-clone6-app"]; s.Invisible {
+		t.Error("app VM should not be invisible")
+	}
+	if s := byName["ns-clone6-webserver"]; !s.Invisible {
+		t.Error("webserver VM should be invisible")
+	}
+}
+
+func TestCheckVMsReady_InvisibleTrueWhenCloneVMAlreadyExists(t *testing.T) {
+	invisibleTemplate := makeTemplateVM("vm-build901", "webserver", false)
+	invisibleTemplate.SetAnnotations(map[string]string{v1alpha1.AnnotationInvisible: annotationTrue})
+
+	cloneVM := &unstructured.Unstructured{}
+	cloneVM.SetGroupVersionKind(vmGVK)
+	cloneVM.SetName("ns-clone7-webserver")
+	cloneVM.SetNamespace("ruddervirt-system")
+
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(cloneVM).
+		Build()
+
+	statuses, allReady, err := CheckVMsReady(context.Background(), c, []*unstructured.Unstructured{invisibleTemplate}, "ns-clone7", "ruddervirt-system")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !allReady {
+		t.Error("allReady should be true — the clone VM exists")
+	}
+	if len(statuses) != 1 || !statuses[0].Invisible {
+		t.Errorf("statuses = %+v, want a single invisible=true entry", statuses)
+	}
+}
+
 func TestBuildInitialVolumeStates_DetectsEFIPVC(t *testing.T) {
 	templateVM := makeTemplateVM("vm-build789", "module", true)
 

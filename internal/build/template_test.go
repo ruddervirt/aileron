@@ -1,9 +1,16 @@
 package build
 
 import (
+	"context"
 	"testing"
 
+	v1alpha1 "github.com/ruddervirt/aileron/api/v1alpha1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 // volumeByName returns the volume map with the given name, or nil.
@@ -147,5 +154,56 @@ func TestRebuildVolumes_CloudInitStripsUserData(t *testing.T) {
 	}
 	if _, ok := data["networkData"]; !ok {
 		t.Error("networkData should have been kept")
+	}
+}
+
+var vmGVK = schema.GroupVersionKind{Group: "kubevirt.io", Version: "v1", Kind: "VirtualMachine"}
+
+func vmScheme(t *testing.T) *runtime.Scheme {
+	t.Helper()
+	s := runtime.NewScheme()
+	s.AddKnownTypeWithName(vmGVK, &unstructured.Unstructured{})
+	s.AddKnownTypeWithName(schema.GroupVersionKind{
+		Group: vmGVK.Group, Version: vmGVK.Version, Kind: vmGVK.Kind + "List",
+	}, &unstructured.UnstructuredList{})
+	return s
+}
+
+// TestConvertToTemplate_PreservesInvisibleAnnotation confirms convertToTemplate
+// merges (rather than replaces) VM-level annotations, so a ruddervirt.io/invisible
+// annotation stamped by buildVM survives the build→template conversion. Labels
+// are rebuilt wholesale here (see convertToTemplate), but annotations are
+// read-merge-written — this is the invariant AnnotationInvisible relies on.
+func TestConvertToTemplate_PreservesInvisibleAnnotation(t *testing.T) {
+	vm := &unstructured.Unstructured{}
+	vm.SetGroupVersionKind(vmGVK)
+	vm.SetName("bld-webserver")
+	vm.SetNamespace("vm-bld")
+	vm.SetAnnotations(map[string]string{v1alpha1.AnnotationInvisible: valueTrue})
+
+	cl := fake.NewClientBuilder().WithScheme(vmScheme(t)).WithObjects(vm).Build()
+	tp := &TemplateProvisioner{Client: cl}
+
+	build := &v1alpha1.VirtualMachineBuild{
+		ObjectMeta: metav1.ObjectMeta{Name: "bld", Namespace: "ruddervirt-system"},
+		Status:     v1alpha1.VirtualMachineBuildStatus{BuildID: "bld"},
+	}
+	vmSpec := &v1alpha1.BuildVM{Name: "webserver", Source: v1alpha1.BuildSource{Blank: true}, Invisible: true}
+
+	converted, err := tp.convertToTemplate(context.Background(), build, "vm-bld", "bld-webserver", "bld-out-webserver", vmSpec, "")
+	if err != nil {
+		t.Fatalf("convertToTemplate: %v", err)
+	}
+	if !converted {
+		t.Fatal("expected VM to be converted")
+	}
+
+	got := &unstructured.Unstructured{}
+	got.SetGroupVersionKind(vmGVK)
+	if err := cl.Get(context.Background(), types.NamespacedName{Name: "bld-webserver", Namespace: "vm-bld"}, got); err != nil {
+		t.Fatalf("getting converted VM: %v", err)
+	}
+	if annotation := got.GetAnnotations()[v1alpha1.AnnotationInvisible]; annotation != valueTrue {
+		t.Errorf("annotations[%s] = %q, want %q", v1alpha1.AnnotationInvisible, annotation, valueTrue)
 	}
 }

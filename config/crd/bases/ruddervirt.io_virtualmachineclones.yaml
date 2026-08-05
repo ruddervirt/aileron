@@ -465,6 +465,13 @@ spec:
                   description: ClonedVMStatus contains information about a cloned
                     VM.
                   properties:
+                    invisible:
+                      description: |-
+                        invisible indicates this VM is excluded from the console/VNC-access UI,
+                        inherited from the template's BuildVM.invisible via the
+                        ruddervirt.io/invisible annotation on the template VM. Clones cannot
+                        override this.
+                      type: boolean
                     message:
                       description: message provides human-readable status.
                       type: string

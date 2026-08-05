@@ -37,6 +37,18 @@ const AnnotationAgeAnchor = "ruddervirt.io/age-anchor"
 // from creationTimestamp plus a fleet-wide max age.
 const AnnotationExpiresAt = "ruddervirt.io/expires-at"
 
+// AnnotationInvisible marks a VM as excluded from the console/VNC-access UI.
+// Stamped "true" by the build controller (internal/build/vm.go buildVM) only
+// when BuildVM.Invisible is true — never stamped "false" or removed
+// explicitly. It survives into the golden template VM because
+// TemplateProvisioner.convertToTemplate merges (not replaces) VM-level
+// annotations, and survives into every cloned VM because
+// clone.ensureVirtualMachine DeepCopies the template VM's annotations
+// unchanged. Consumed by internal/clone/volume.go (CheckVMsReady) to
+// populate ClonedVMStatus.Invisible, and by internal/ui/server.go to
+// exclude the VM from a build's or clone's Consoles list.
+const AnnotationInvisible = "ruddervirt.io/invisible"
+
 // Grade job labels stamp the grader Job (and its pod template) with the
 // GradeRequest name and its target VM/namespace, so the controller can locate a
 // running grade job for a given VM.
