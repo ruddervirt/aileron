@@ -266,10 +266,7 @@ func (s *SnapshotManager) EnsureBaseSnapshotReady(ctx context.Context, cloneName
 			state.Message = warning
 		}
 
-		snapshotName := fmt.Sprintf("%s-%s-snap", state.SourcePVCName, cloneName)
-		if len(snapshotName) > 63 {
-			snapshotName = snapshotName[:63]
-		}
+		snapshotName := truncateName(fmt.Sprintf("%s-%s-snap", state.SourcePVCName, cloneName))
 
 		// The base snapshot is shared by every clone of this template, so its
 		// lifecycle must NOT be tied to the clone that happens to create it.

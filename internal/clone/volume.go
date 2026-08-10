@@ -51,22 +51,14 @@ type VolumeManager struct {
 //
 // Example: cloneID="cl-abc", vmShortName="builder" → "cl-abc-builder".
 func CloneVMName(cloneID, vmShortName string) string {
-	name := cloneID + "-" + vmShortName
-	if len(name) > 63 {
-		name = name[:63]
-	}
-	return name
+	return truncateName(cloneID + "-" + vmShortName)
 }
 
 // CloneDiskPVCName derives the destination PVC name for a cloned disk. It is
 // unique per (clone, VM, volume) so a multi-disk VM does not collide every disk
 // onto a single name — efivars and additional data disks all follow this scheme.
 func CloneDiskPVCName(cloneID, vmShortName, volumeName string) string {
-	name := fmt.Sprintf("%s-%s-%s", cloneID, vmShortName, volumeName)
-	if len(name) > 63 {
-		name = name[:63]
-	}
-	return name
+	return truncateName(fmt.Sprintf("%s-%s-%s", cloneID, vmShortName, volumeName))
 }
 
 // templateVMShortName returns the short VM name stored in the template VM's
