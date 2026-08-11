@@ -105,7 +105,10 @@ func (t *TemplateProvisioner) cleanupEphemeralResources(ctx context.Context, bui
 	})
 	if err := t.Client.List(ctx, isoCloneList,
 		client.InNamespace(buildNS),
-		client.MatchingLabels{"ruddervirt.io/iso-clone": "true"},
+		client.MatchingLabels{
+			"ruddervirt.io/iso-clone": "true",
+			LabelBuildID:              BuildID(build),
+		},
 	); err == nil {
 		for i := range isoCloneList.Items {
 			if err := t.Client.Delete(ctx, &isoCloneList.Items[i]); err != nil && !errors.IsNotFound(err) {

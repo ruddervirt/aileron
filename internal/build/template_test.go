@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	v1alpha1 "github.com/ruddervirt/aileron/api/v1alpha1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -155,6 +156,58 @@ func TestRebuildVolumes_CloudInitStripsUserData(t *testing.T) {
 	}
 	if _, ok := data["networkData"]; !ok {
 		t.Error("networkData should have been kept")
+	}
+}
+
+// TestCleanupEphemeralResources_ISOCloneScopedToBuild guards against a
+// regression where cleanupEphemeralResources deleted every DataVolume
+// labeled iso-clone=true in the (shared) build namespace, not just the ones
+// belonging to the build being cleaned up. Since all builds share the
+// operator namespace, an unscoped delete collaterally destroys another
+// build's in-flight ISO clone DV, which then surfaces as a KubeVirt
+// "unable to find datavolume" boot failure for the unrelated build.
+func TestCleanupEphemeralResources_ISOCloneScopedToBuild(t *testing.T) {
+	ownDV := &unstructured.Unstructured{}
+	ownDV.SetGroupVersionKind(dvGVK)
+	ownDV.SetName("bld-a-server-iso0")
+	ownDV.SetNamespace("ruddervirt-system")
+	ownDV.SetLabels(map[string]string{
+		"ruddervirt.io/iso-clone": "true",
+		LabelBuildID:              "bld-a",
+	})
+
+	otherDV := &unstructured.Unstructured{}
+	otherDV.SetGroupVersionKind(dvGVK)
+	otherDV.SetName("bld-b-server-iso0")
+	otherDV.SetNamespace("ruddervirt-system")
+	otherDV.SetLabels(map[string]string{
+		"ruddervirt.io/iso-clone": "true",
+		LabelBuildID:              "bld-b",
+	})
+
+	cl := fake.NewClientBuilder().WithScheme(isoScheme(t)).WithObjects(ownDV, otherDV).Build()
+	tp := &TemplateProvisioner{Client: cl}
+
+	build := &v1alpha1.VirtualMachineBuild{
+		ObjectMeta: metav1.ObjectMeta{Name: "bld-a", Namespace: "ruddervirt-system"},
+		Status:     v1alpha1.VirtualMachineBuildStatus{BuildID: "bld-a"},
+	}
+
+	tp.cleanupEphemeralResources(context.Background(), build, "ruddervirt-system")
+
+	got := &unstructured.Unstructured{}
+	got.SetGroupVersionKind(dvGVK)
+	err := cl.Get(context.Background(), types.NamespacedName{Name: "bld-a-server-iso0", Namespace: "ruddervirt-system"}, got)
+	if err == nil {
+		t.Error("own build's ISO clone DV should have been deleted, but still exists")
+	} else if !apierrors.IsNotFound(err) {
+		t.Errorf("unexpected error getting own build's ISO clone DV: %v", err)
+	}
+
+	other := &unstructured.Unstructured{}
+	other.SetGroupVersionKind(dvGVK)
+	if err := cl.Get(context.Background(), types.NamespacedName{Name: "bld-b-server-iso0", Namespace: "ruddervirt-system"}, other); err != nil {
+		t.Fatalf("other build's ISO clone DV should survive cleanup, got error: %v", err)
 	}
 }
 
