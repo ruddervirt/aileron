@@ -189,8 +189,9 @@ spec:
                 type: string
               templateName:
                 description: |-
-                  templateName is the golden template name. The template namespace is resolved
-                  as vm-{templateName} and must contain pre-configured VMs with their disks.
+                  templateName is the name of a Succeeded VirtualMachineBuild in this
+                  VirtualMachineClone's own namespace; its status.templateNamespace holds
+                  the pre-configured template VMs and their disks to clone from.
                 type: string
               timeout:
                 default: 15m

@@ -192,7 +192,7 @@ func (r *VirtualMachineCloneReconciler) handlePending(ctx context.Context, vmClo
 }
 
 func (r *VirtualMachineCloneReconciler) handleValidating(ctx context.Context, vmClone *v1alpha1.VirtualMachineClone) (ctrl.Result, error) {
-	templateNS, templateVMs, err := clone.ValidateTemplate(ctx, r.Client, vmClone.Spec.TemplateName)
+	templateNS, templateVMs, err := clone.ValidateTemplate(ctx, r.Client, vmClone.Namespace, vmClone.Spec.TemplateName)
 	if err != nil {
 		return r.failClone(ctx, vmClone, err)
 	}

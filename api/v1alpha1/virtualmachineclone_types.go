@@ -86,8 +86,9 @@ type VMOverride struct {
 
 // VirtualMachineCloneSpec defines the desired state of VirtualMachineClone.
 type VirtualMachineCloneSpec struct {
-	// templateName is the golden template name. The template namespace is resolved
-	// as vm-{templateName} and must contain pre-configured VMs with their disks.
+	// templateName is the name of a Succeeded VirtualMachineBuild in this
+	// VirtualMachineClone's own namespace; its status.templateNamespace holds
+	// the pre-configured template VMs and their disks to clone from.
 	// +required
 	TemplateName string `json:"templateName"`
 

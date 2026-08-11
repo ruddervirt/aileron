@@ -68,7 +68,7 @@ func (r *RelayPodManager) EnsureRelayPod(ctx context.Context, build *v1alpha1.Vi
 	if listErr := r.Client.List(ctx, staleList,
 		client.InNamespace(buildNS),
 		client.MatchingLabels{
-			LabelBuild:     build.Name,
+			LabelBuildID:   buildID,
 			LabelComponent: "relay",
 		},
 	); listErr == nil {
@@ -101,7 +101,7 @@ func (r *RelayPodManager) IsRelayReady(ctx context.Context, build *v1alpha1.Virt
 	if listErr := r.Client.List(ctx, staleList,
 		client.InNamespace(buildNS),
 		client.MatchingLabels{
-			LabelBuild:     build.Name,
+			LabelBuildID:   buildID,
 			LabelComponent: "relay",
 		},
 	); listErr == nil {

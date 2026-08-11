@@ -15,10 +15,15 @@ var vmGVK = schema.GroupVersionKind{
 }
 
 // findBuild returns the VirtualMachineBuild whose name matches templateName,
-// searched across all namespaces. Returns (nil, nil) when no such build exists.
-func findBuild(ctx context.Context, c client.Client, templateName string) (*v1alpha1.VirtualMachineBuild, error) {
+// searched within cloneNamespace — the namespace of the VirtualMachineClone
+// doing the lookup. Scoping to that namespace (rather than searching
+// cluster-wide) matches Aileron's namespace model, where a build's and its
+// clones' CRs conventionally live side by side, and prevents a clone from
+// resolving to a same-named VirtualMachineBuild that happens to live in an
+// unrelated namespace. Returns (nil, nil) when no such build exists.
+func findBuild(ctx context.Context, c client.Client, cloneNamespace, templateName string) (*v1alpha1.VirtualMachineBuild, error) {
 	buildList := &v1alpha1.VirtualMachineBuildList{}
-	if err := c.List(ctx, buildList); err != nil {
+	if err := c.List(ctx, buildList, client.InNamespace(cloneNamespace)); err != nil {
 		return nil, fmt.Errorf("listing builds: %w", err)
 	}
 	for i := range buildList.Items {
@@ -31,8 +36,8 @@ func findBuild(ctx context.Context, c client.Client, templateName string) (*v1al
 
 // TemplateNamespace finds the namespace containing template VMs for a build.
 // Looks up the VirtualMachineBuild CR's status.templateNamespace.
-func TemplateNamespace(ctx context.Context, c client.Client, templateName string) (string, error) {
-	b, err := findBuild(ctx, c, templateName)
+func TemplateNamespace(ctx context.Context, c client.Client, cloneNamespace, templateName string) (string, error) {
+	b, err := findBuild(ctx, c, cloneNamespace, templateName)
 	if err != nil {
 		return "", err
 	}
@@ -99,8 +104,8 @@ func templateOutputVolumesExist(ctx context.Context, c client.Client, templateNa
 // rudder-ui / Grafana) names the exact remediation rather than a bare
 // "no VirtualMachines found in template namespace <ns>", which cannot be told
 // apart from an in-flight or failed build.
-func ValidateTemplate(ctx context.Context, c client.Client, templateName string) (string, []*unstructured.Unstructured, error) {
-	b, err := findBuild(ctx, c, templateName)
+func ValidateTemplate(ctx context.Context, c client.Client, cloneNamespace, templateName string) (string, []*unstructured.Unstructured, error) {
+	b, err := findBuild(ctx, c, cloneNamespace, templateName)
 	if err != nil {
 		return "", nil, fmt.Errorf("validating template %s: %w", templateName, err)
 	}

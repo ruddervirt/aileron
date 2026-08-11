@@ -271,12 +271,15 @@ func (r *VirtualMachineBuildReconciler) Reconcile(ctx context.Context, req ctrl.
 	// Look for an existing VirtualMachineNamespace owned by this build to recover.
 	if vmBuild.Status.BuildID == "" && vmBuild.Status.Phase != "" {
 		vmnsList := &v1alpha1.VirtualMachineNamespaceList{}
+		recovered := ""
 		if err := r.List(ctx, vmnsList,
 			client.InNamespace(OperatorNamespace()),
 			client.MatchingLabels{build.LabelBuild: vmBuild.Name},
-		); err == nil && len(vmnsList.Items) > 0 {
+		); err == nil {
+			recovered = findOwnedVMNS(vmnsList, vmBuild)
+		}
+		if recovered != "" {
 			// Recover buildID from existing VMNS.
-			recovered := vmnsList.Items[0].Name
 			logger.Info("Recovered buildID from existing VirtualMachineNamespace", "buildID", recovered)
 			vmBuild.Status.BuildID = recovered
 			vmBuild.Status.BuildNamespace = OperatorNamespace()
@@ -449,11 +452,13 @@ func (r *VirtualMachineBuildReconciler) handleDeletion(ctx context.Context, vmBu
 		if err := r.List(ctx, vmnsList,
 			client.InNamespace(OperatorNamespace()),
 			client.MatchingLabels{build.LabelBuild: vmBuild.Name},
-		); err == nil && len(vmnsList.Items) > 0 {
-			vmBuild.Status.BuildID = vmnsList.Items[0].Name
-			vmBuild.Status.BuildNamespace = OperatorNamespace()
-			vmBuild.Status.VirtualMachineNamespace = vmnsList.Items[0].Name
-			logger.Info("Recovered buildID for deletion cleanup", "buildID", vmBuild.Status.BuildID)
+		); err == nil {
+			if recovered := findOwnedVMNS(vmnsList, vmBuild); recovered != "" {
+				vmBuild.Status.BuildID = recovered
+				vmBuild.Status.BuildNamespace = OperatorNamespace()
+				vmBuild.Status.VirtualMachineNamespace = recovered
+				logger.Info("Recovered buildID for deletion cleanup", "buildID", vmBuild.Status.BuildID)
+			}
 		}
 	}
 
@@ -595,6 +600,23 @@ func (r *VirtualMachineBuildReconciler) normalizeBuildRefDisks(ctx context.Conte
 
 	vmSpec.Disks = append(append([]v1alpha1.BuildDisk{}, parentDisks...), vmSpec.Disks...)
 	return true, nil
+}
+
+// findOwnedVMNS returns the name of the VirtualMachineNamespace whose
+// Spec.OwnerRef points at this exact build (by name and namespace), or ""
+// if none matches. vmnsList is typically pre-filtered by the LabelBuild
+// label, but that label alone isn't unique across tenant namespaces — two
+// VirtualMachineBuild CRs in different namespaces can share the same
+// .metadata.name — so the owner ref is checked to avoid recovering (and
+// later cleaning up) another build's VirtualMachineNamespace.
+func findOwnedVMNS(vmnsList *v1alpha1.VirtualMachineNamespaceList, vmBuild *v1alpha1.VirtualMachineBuild) string {
+	for i := range vmnsList.Items {
+		ref := vmnsList.Items[i].Spec.OwnerRef
+		if ref != nil && ref.Name == vmBuild.Name && ref.Namespace == vmBuild.Namespace {
+			return vmnsList.Items[i].Name
+		}
+	}
+	return ""
 }
 
 // allVMsSucceeded returns true if every VM in the build has reached the
