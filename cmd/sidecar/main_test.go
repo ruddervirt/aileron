@@ -31,7 +31,7 @@ var kubevirtEFIDomainXML = fmt.Sprintf(`<domain type='kvm'>
 func TestOnDefineDomainRedirectsNVRamToPVC(t *testing.T) {
 	logger := log.New(&bytes.Buffer{}, "", 0)
 
-	out, err := onDefineDomain(logger, []byte(kubevirtEFIDomainXML))
+	out, err := onDefineDomain(logger, []byte(kubevirtEFIDomainXML), false)
 	if err != nil {
 		t.Fatalf("onDefineDomain: %v", err)
 	}
@@ -62,11 +62,11 @@ func TestOnDefineDomainIdempotent(t *testing.T) {
 	// XML should be a no-op (no double-rewrite, no corruption).
 	logger := log.New(&bytes.Buffer{}, "", 0)
 
-	first, err := onDefineDomain(logger, []byte(kubevirtEFIDomainXML))
+	first, err := onDefineDomain(logger, []byte(kubevirtEFIDomainXML), false)
 	if err != nil {
 		t.Fatalf("first onDefineDomain: %v", err)
 	}
-	second, err := onDefineDomain(logger, []byte(first))
+	second, err := onDefineDomain(logger, []byte(first), false)
 	if err != nil {
 		t.Fatalf("second onDefineDomain: %v", err)
 	}
@@ -136,11 +136,39 @@ func TestOnDefineDomainNoEFI(t *testing.T) {
   </os>
 </domain>`
 
-	out, err := onDefineDomain(logger, []byte(biosXML))
+	out, err := onDefineDomain(logger, []byte(biosXML), false)
 	if err != nil {
 		t.Fatalf("onDefineDomain: %v", err)
 	}
 	if strings.Contains(out, "OVMF") || strings.Contains(out, "efivars") {
 		t.Errorf("BIOS VM picked up EFI paths; got:\n%s", out)
+	}
+}
+
+func TestOnDefineDomainFloppyDisabled(t *testing.T) {
+	// injectFloppy=false must never add a floppy device, regardless of the
+	// domain XML content — this is the gate that keeps clones from ever
+	// getting a floppy injected even though floppy.img bytes may be
+	// physically present on their (snapshot-restored) PVC.
+	logger := log.New(&bytes.Buffer{}, "", 0)
+
+	out, err := onDefineDomain(logger, []byte(kubevirtEFIDomainXML), false)
+	if err != nil {
+		t.Fatalf("onDefineDomain: %v", err)
+	}
+	if strings.Contains(out, `device="floppy"`) {
+		t.Errorf("floppy device injected despite injectFloppy=false; got:\n%s", out)
+	}
+}
+
+func TestOnDefineDomainFloppyEnabled(t *testing.T) {
+	logger := log.New(&bytes.Buffer{}, "", 0)
+
+	out, err := onDefineDomain(logger, []byte(kubevirtEFIDomainXML), true)
+	if err != nil {
+		t.Fatalf("onDefineDomain: %v", err)
+	}
+	if !strings.Contains(out, `device="floppy"`) {
+		t.Errorf("floppy device not injected despite injectFloppy=true; got:\n%s", out)
 	}
 }

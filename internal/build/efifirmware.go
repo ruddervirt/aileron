@@ -308,14 +308,21 @@ func IsEFIFirmwareReady(ctx context.Context, c client.Client, build *v1alpha1.Vi
 // BuildHookSidecarsAnnotation returns the JSON value for the
 // hooks.kubevirt.io/hookSidecars annotation. Uses the aileron/sidecar image
 // which contains a compiled Go binary for domain XML modification.
-// Returns empty string if no hooks are needed.
-func BuildHookSidecarsAnnotation(buildID string, vmSpec *v1alpha1.BuildVM) (string, error) {
+// Returns empty string if no hooks are needed. floppyEnabled controls
+// whether the sidecar is told to inject the floppy device — callers must
+// pass false for anything that is not the live build VM (e.g. the persisted
+// template), so the enablement signal never survives past the build.
+func BuildHookSidecarsAnnotation(buildID string, vmSpec *v1alpha1.BuildVM, floppyEnabled bool) (string, error) {
 	if vmSpec.EFIFirmware == nil && vmSpec.Floppy == nil {
 		return "", nil
 	}
 
+	args := []string{"--version", "v1alpha2"}
+	if floppyEnabled {
+		args = append(args, "--floppy")
+	}
 	hook := map[string]any{
-		"args":  []string{"--version", "v1alpha2"},
+		"args":  args,
 		"image": sidecarImage(),
 	}
 

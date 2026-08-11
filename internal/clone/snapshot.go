@@ -2,6 +2,7 @@ package clone
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"sync"
@@ -160,10 +161,10 @@ func (s *SnapshotManager) BuildInitialVolumeStates(ctx context.Context, template
 			states = append(states, state)
 		}
 
-		// Detect EFI firmware PVC. The sidecar hook mounts it outside the
-		// normal volume list, so it won't be found by the volume scan above.
-		_, hasEFI, _ := unstructured.NestedMap(vm.Object, "spec", "template", "spec", "domain", "firmware", "bootloader", "efi")
-		if !hasEFI {
+		// Detect the efivars-style PVC. The sidecar hook mounts it outside
+		// the normal volume list, so it won't be found by the volume scan
+		// above.
+		if !hasEFIVarsPVCMount(vm) {
 			continue
 		}
 		buildID := vm.GetLabels()["ruddervirt.io/build-id"]
@@ -213,6 +214,32 @@ func (s *SnapshotManager) BuildInitialVolumeStates(ctx context.Context, template
 	}
 
 	return states, nil
+}
+
+// hasEFIVarsPVCMount reports whether the template VM's VMI hookSidecars
+// annotation declares a PVC mount — the actual signal that an efivars-style
+// PVC exists for this VM (set whenever the build used efiFirmware and/or
+// floppy; see internal/build.BuildHookSidecarsAnnotation). Checking this
+// instead of spec.domain.firmware.bootloader.efi fixes floppy-only builds
+// (no efiFirmware) never getting their efivars PVC snapshotted for clones,
+// which left those clones with a stale hookSidecars PVC reference pointing
+// at the (inaccessible, build-namespace) source PVC.
+func hasEFIVarsPVCMount(vm *unstructured.Unstructured) bool {
+	annotations, _, _ := unstructured.NestedStringMap(vm.Object, "spec", "template", "metadata", "annotations")
+	raw, ok := annotations["hooks.kubevirt.io/hookSidecars"]
+	if !ok || raw == "" {
+		return false
+	}
+	var hooks []map[string]any
+	if err := json.Unmarshal([]byte(raw), &hooks); err != nil {
+		return false
+	}
+	for _, h := range hooks {
+		if _, ok := h["pvc"]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // snapshotRestoreState classifies whether a VolumeSnapshot can back a clone PVC.

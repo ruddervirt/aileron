@@ -205,12 +205,21 @@ func (t *TemplateProvisioner) convertToTemplate(ctx context.Context, build *v1al
 		// --- VMI template metadata ---
 
 		// Clear VMI annotations (KubeOVN provider annotations, etc.) but
-		// preserve the hook sidecar annotation so clones use custom OVMF firmware.
+		// regenerate the hook sidecar annotation so clones use custom OVMF
+		// firmware. Regenerated (not copied verbatim from the build VM) so
+		// the persisted template can never carry the build's --floppy
+		// enablement signal forward — floppy is build-only, and clones
+		// derive their own hook annotation from this template's PVC mount
+		// (RewireVMVolumes/ensureVirtualMachine), never from an injected
+		// floppy device.
 		const hookAnnotation = "hooks.kubevirt.io/hookSidecars"
-		vmiAnnotations, _, _ := unstructured.NestedStringMap(vm.Object, "spec", "template", "metadata", "annotations")
+		hookJSON, err := BuildHookSidecarsAnnotation(BuildID(build), vmSpec, false)
+		if err != nil {
+			return fmt.Errorf("building template hook sidecar annotation: %w", err)
+		}
 		newVMIAnnotations := map[string]any{}
-		if hook, ok := vmiAnnotations[hookAnnotation]; ok {
-			newVMIAnnotations[hookAnnotation] = hook
+		if hookJSON != "" {
+			newVMIAnnotations[hookAnnotation] = hookJSON
 		}
 		_ = unstructured.SetNestedField(vm.Object, newVMIAnnotations, "spec", "template", "metadata", "annotations")
 

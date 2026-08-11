@@ -2,6 +2,7 @@ package build
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	v1alpha1 "github.com/ruddervirt/aileron/api/v1alpha1"
@@ -205,5 +206,60 @@ func TestConvertToTemplate_PreservesInvisibleAnnotation(t *testing.T) {
 	}
 	if annotation := got.GetAnnotations()[v1alpha1.AnnotationInvisible]; annotation != valueTrue {
 		t.Errorf("annotations[%s] = %q, want %q", v1alpha1.AnnotationInvisible, annotation, valueTrue)
+	}
+}
+
+// TestConvertToTemplate_RegeneratesHookAnnotationWithoutFloppy confirms the
+// persisted template VM's hookSidecars annotation is regenerated (not copied
+// verbatim from the live build VM), and always omits --floppy even when the
+// build VM's own annotation carried it and vmSpec.Floppy was set — floppy is
+// build-only, and this is the defense-in-depth guarantee that no enablement
+// signal survives past the build into what clones inherit.
+func TestConvertToTemplate_RegeneratesHookAnnotationWithoutFloppy(t *testing.T) {
+	vm := &unstructured.Unstructured{}
+	vm.SetGroupVersionKind(vmGVK)
+	vm.SetName("bld-installer")
+	vm.SetNamespace("vm-bld")
+	_ = unstructured.SetNestedField(vm.Object, map[string]any{
+		"hooks.kubevirt.io/hookSidecars": `[{"args":["--version","v1alpha2","--floppy"],"image":"ghcr.io/ruddervirt/aileron/sidecar:latest","pvc":{"name":"bld-installer-efivars","volumePath":"/efivars","sharedComputePath":"/var/run/efivars"}}]`,
+	}, "spec", "template", "metadata", "annotations")
+
+	cl := fake.NewClientBuilder().WithScheme(vmScheme(t)).WithObjects(vm).Build()
+	tp := &TemplateProvisioner{Client: cl}
+
+	build := &v1alpha1.VirtualMachineBuild{
+		ObjectMeta: metav1.ObjectMeta{Name: "bld", Namespace: "ruddervirt-system"},
+		Status:     v1alpha1.VirtualMachineBuildStatus{BuildID: "bld"},
+	}
+	vmSpec := &v1alpha1.BuildVM{
+		Name:   "installer",
+		Source: v1alpha1.BuildSource{Blank: true},
+		Floppy: &v1alpha1.Floppy{Files: []v1alpha1.FloppyFileRef{{Name: "Autounattend.xml"}}},
+	}
+
+	converted, err := tp.convertToTemplate(context.Background(), build, "vm-bld", "bld-installer", "bld-out-installer", vmSpec, "")
+	if err != nil {
+		t.Fatalf("convertToTemplate: %v", err)
+	}
+	if !converted {
+		t.Fatal("expected VM to be converted")
+	}
+
+	got := &unstructured.Unstructured{}
+	got.SetGroupVersionKind(vmGVK)
+	if err := cl.Get(context.Background(), types.NamespacedName{Name: "bld-installer", Namespace: "vm-bld"}, got); err != nil {
+		t.Fatalf("getting converted VM: %v", err)
+	}
+
+	annotations, _, _ := unstructured.NestedStringMap(got.Object, "spec", "template", "metadata", "annotations")
+	hookJSON, ok := annotations["hooks.kubevirt.io/hookSidecars"]
+	if !ok {
+		t.Fatal("expected hook sidecar annotation to be regenerated on template VM")
+	}
+	if strings.Contains(hookJSON, "--floppy") {
+		t.Errorf("template hookSidecars annotation carries --floppy forward: %s", hookJSON)
+	}
+	if !strings.Contains(hookJSON, `"pvc"`) {
+		t.Errorf("template hookSidecars annotation missing PVC mount despite vmSpec.Floppy set: %s", hookJSON)
 	}
 }

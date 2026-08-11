@@ -42,8 +42,11 @@ const (
 
 func main() {
 	var vmiJSON, domainXML string
+	var floppyEnabled bool
 	pflag.StringVar(&vmiJSON, "vmi", "", "VMI spec in JSON format")
 	pflag.StringVar(&domainXML, "domain", "", "Domain spec in XML format")
+	pflag.BoolVar(&floppyEnabled, "floppy", false,
+		"enable floppy device injection (requires floppy.img on the mounted efivars PVC)")
 	pflag.Parse()
 
 	logger := log.New(os.Stderr, "aileron-sidecar: ", 0)
@@ -52,7 +55,23 @@ func main() {
 		logger.Fatal("--domain is required")
 	}
 
-	result, err := onDefineDomain(logger, []byte(domainXML))
+	// Floppy injection requires both the explicit flag AND the image file
+	// present on the mounted EFI PVC. The flag is the primary, positive
+	// gate — a clone's hook annotation never sets it, so a clone can never
+	// inject a floppy device even though the image bytes may still be
+	// physically present (inherited via a snapshot-restored PVC). File
+	// presence remains a secondary guard against a build that requested the
+	// flag before the image job finished.
+	injectFloppy := false
+	if floppyEnabled {
+		if _, err := os.Stat(floppySidecarPath); err == nil {
+			injectFloppy = true
+		} else {
+			logger.Printf("--floppy set but %s not found, skipping floppy injection", floppySidecarPath)
+		}
+	}
+
+	result, err := onDefineDomain(logger, []byte(domainXML), injectFloppy)
 	if err != nil {
 		logger.Fatalf("onDefineDomain failed: %v", err)
 	}
@@ -60,7 +79,7 @@ func main() {
 	fmt.Print(result)
 }
 
-func onDefineDomain(logger *log.Logger, domainXML []byte) (string, error) {
+func onDefineDomain(logger *log.Logger, domainXML []byte, injectFloppy bool) (string, error) {
 	var domain libvirtxml.Domain
 	if err := xml.Unmarshal(domainXML, &domain); err != nil {
 		return "", fmt.Errorf("unmarshal domain XML: %w", err)
@@ -68,8 +87,7 @@ func onDefineDomain(logger *log.Logger, domainXML []byte) (string, error) {
 
 	replaceEFIPaths(logger, &domain)
 
-	// Only inject floppy if the image exists on the EFI PVC.
-	if _, err := os.Stat(floppySidecarPath); err == nil {
+	if injectFloppy {
 		replaceFloppyDevice(logger, &domain)
 	}
 

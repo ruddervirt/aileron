@@ -3,6 +3,7 @@ package clone
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -320,6 +321,22 @@ func makeTemplateVM(buildID, vmShortName string, withEFI bool) *unstructured.Uns
 				"efi": map[string]any{"secureBoot": false},
 			},
 		}, "spec", "template", "spec", "domain", "firmware")
+		// BuildInitialVolumeStates detects an efivars-style PVC via the
+		// hookSidecars annotation's "pvc" key (set by
+		// internal/build.BuildHookSidecarsAnnotation whenever the build used
+		// efiFirmware and/or floppy), not via the firmware block alone.
+		hookJSON, _ := json.Marshal([]map[string]any{{
+			"args":  []string{"--version", "v1alpha2"},
+			"image": "ghcr.io/ruddervirt/aileron/sidecar:latest",
+			"pvc": map[string]any{
+				"name":              buildID + "-" + vmShortName + "-efivars",
+				"volumePath":        "/efivars",
+				"sharedComputePath": "/var/run/efivars",
+			},
+		}})
+		_ = unstructured.SetNestedField(vm.Object, map[string]any{
+			"hooks.kubevirt.io/hookSidecars": string(hookJSON),
+		}, "spec", "template", "metadata", "annotations")
 	}
 	return vm
 }
@@ -684,7 +701,7 @@ func TestBuildInitialVolumeStates_DetectsEFIPVC(t *testing.T) {
 	}
 }
 
-func TestBuildInitialVolumeStates_NoEFIWithoutFirmware(t *testing.T) {
+func TestBuildInitialVolumeStates_NoEFIWithoutHookAnnotation(t *testing.T) {
 	templateVM := makeTemplateVM("vm-build000", "server", false)
 
 	rootPVC := &corev1.PersistentVolumeClaim{
@@ -739,6 +756,115 @@ func TestBuildInitialVolumeStates_NoEFIWithoutFirmware(t *testing.T) {
 	}
 	if len(states) != 1 {
 		t.Errorf("got %d states, want 1 (rootdisk only)", len(states))
+	}
+}
+
+// TestBuildInitialVolumeStates_DetectsEFIPVC_FloppyOnly is the direct
+// regression test for the "floppy without efiFirmware" bug: a template VM
+// with a hookSidecars/pvc annotation (set because the build used floppy) but
+// no spec.domain.firmware.bootloader.efi block must still get its efivars
+// PVC captured for cloning — otherwise clones inherit a stale,
+// build-namespace-pointing hookSidecars annotation and fail to mount/start.
+func TestBuildInitialVolumeStates_DetectsEFIPVC_FloppyOnly(t *testing.T) {
+	buildID, vmShortName := "vm-build999", "installer"
+	templateVM := makeTemplateVM(buildID, vmShortName, false)
+	hookJSON, _ := json.Marshal([]map[string]any{{
+		"args":  []string{"--version", "v1alpha2", "--floppy"},
+		"image": "ghcr.io/ruddervirt/aileron/sidecar:latest",
+		"pvc": map[string]any{
+			"name":              buildID + "-" + vmShortName + "-efivars",
+			"volumePath":        "/efivars",
+			"sharedComputePath": "/var/run/efivars",
+		},
+	}})
+	_ = unstructured.SetNestedField(templateVM.Object, map[string]any{
+		"hooks.kubevirt.io/hookSidecars": string(hookJSON),
+	}, "spec", "template", "metadata", "annotations")
+
+	efiPVC := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      buildID + "-" + vmShortName + "-efivars",
+			Namespace: "ruddervirt-system",
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			VolumeName:       "pv-efi-002",
+			StorageClassName: new("rook-ceph-block"),
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceStorage: resource.MustParse("256Mi"),
+				},
+			},
+		},
+	}
+	rootPVC := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      buildID + "-out-" + vmShortName,
+			Namespace: "ruddervirt-system",
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			VolumeName:       "pv-root-003",
+			StorageClassName: new("rook-ceph-block"),
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceStorage: resource.MustParse("37Gi"),
+				},
+			},
+		},
+	}
+	efiPV := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: "pv-efi-002"},
+		Spec: corev1.PersistentVolumeSpec{
+			PersistentVolumeSource: corev1.PersistentVolumeSource{
+				CSI: &corev1.CSIPersistentVolumeSource{Driver: "rook-ceph.rbd.csi.ceph.com"},
+			},
+		},
+	}
+	rootPV := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: "pv-root-003"},
+		Spec: corev1.PersistentVolumeSpec{
+			PersistentVolumeSource: corev1.PersistentVolumeSource{
+				CSI: &corev1.CSIPersistentVolumeSource{Driver: "rook-ceph.rbd.csi.ceph.com"},
+			},
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(rootPVC, efiPVC, rootPV, efiPV).
+		Build()
+
+	sm := &SnapshotManager{Client: c}
+	states, err := sm.BuildInitialVolumeStates(
+		context.Background(),
+		[]*unstructured.Unstructured{templateVM},
+		"ruddervirt-system",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	efiState, ok := findVolumeState(states, EFIVarsVolumeName)
+	if !ok {
+		t.Fatal("efivars volume state not found for floppy-only (non-EFI) template VM")
+	}
+	if efiState.SourcePVCName != buildID+"-"+vmShortName+"-efivars" {
+		t.Errorf("efivars PVC = %s, want %s-%s-efivars", efiState.SourcePVCName, buildID, vmShortName)
+	}
+}
+
+// TestHookSidecarsJSON_NeverEmitsFloppyArg documents the invariant the
+// default-off fix relies on: hookSidecarsJSON has no floppy awareness at
+// all, so a clone's regenerated hook annotation can never carry --floppy,
+// regardless of what the template's original annotation contained.
+func TestHookSidecarsJSON_NeverEmitsFloppyArg(t *testing.T) {
+	got, err := hookSidecarsJSON("some-efivars-pvc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got, "--floppy") {
+		t.Errorf("hookSidecarsJSON emitted --floppy; got: %s", got)
 	}
 }
 

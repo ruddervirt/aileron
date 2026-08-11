@@ -254,7 +254,9 @@ next starts:
 **ISOs & floppy** — `isos[]` are cached as `ReadOnlyMany` PVCs keyed by
 `checksum` (or the URL's hash if omitted) and shared across builds. `floppy`
 attaches a disk built from named `spec.files[]` entries — useful for Windows
-`Autounattend.xml`/sysprep or BIOS-era boot configuration.
+`Autounattend.xml`/sysprep or BIOS-era boot configuration. `floppy` is
+**build-only**: it has no clone-side equivalent, and floppy content is never
+attached to a cloned VM, regardless of what the template build used.
 
 **Invisible VMs** — `spec.vms[].invisible` (default `false`) excludes a VM
 from the console/VNC-access UI, for the build itself and for every clone made
