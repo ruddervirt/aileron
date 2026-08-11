@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -34,6 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -41,6 +43,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	v1alpha1 "github.com/ruddervirt/aileron/api/v1alpha1"
@@ -49,6 +52,21 @@ import (
 	"github.com/ruddervirt/aileron/internal/namespace"
 	"github.com/ruddervirt/aileron/internal/network"
 )
+
+// buildsDeletedUnclonable counts VirtualMachineBuild CRs the controller has
+// deleted because their template stayed unclonable past FAILURE_RETENTION —
+// the metric-side half of the audit trail deleteIfUnclonableTooLong also
+// writes as a log line and a Kubernetes Event, so a mass deletion (e.g. every
+// pre-existing unclonable build flipping at once on operator upgrade) is
+// distinguishable from user-initiated deletes without grepping logs.
+var buildsDeletedUnclonable = prometheus.NewCounter(prometheus.CounterOpts{
+	Name: "aileron_builds_deleted_unclonable_total",
+	Help: "Total VirtualMachineBuild CRs deleted because their template stayed unclonable past FAILURE_RETENTION.",
+})
+
+func init() {
+	crmetrics.Registry.MustRegister(buildsDeletedUnclonable)
+}
 
 const (
 	requeueInterval = 15 * time.Second
@@ -89,6 +107,13 @@ type VirtualMachineBuildReconciler struct {
 	Scheme      *runtime.Scheme
 	RESTConfig  *rest.Config
 	BuildLimits *build.BuildLimits
+
+	// Recorder emits Kubernetes Events for actions an operator needs to be
+	// able to attribute after the fact — currently only the unclonable-build
+	// retention cleanup in deleteIfUnclonableTooLong, so it's distinguishable
+	// from a user-initiated `kubectl delete vmb` in the event/audit trail. Nil
+	// in tests that don't need it; callers must guard with a nil check.
+	Recorder events.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=ruddervirt.io,resources=virtualmachinebuilds,verbs=get;list;watch;create;update;patch;delete
@@ -111,6 +136,7 @@ type VirtualMachineBuildReconciler struct {
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch;create
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumes,verbs=get;list;watch;update;patch
@@ -982,11 +1008,21 @@ func (r *VirtualMachineBuildReconciler) reconcileTemplateHealth(ctx context.Cont
 }
 
 // deleteIfUnclonableTooLong deletes vmBuild once its Clonable condition has
-// been False for at least build.FailureRetention() — the same knob that
-// already governs how long Failed builds are kept around for inspection
-// before cleanup. FailureRetention() defaults to 0 (immediate cleanup) when
-// FAILURE_RETENTION is unset, matching the existing Failed-build semantics
-// in failureCleanupDelay. Returns true if a delete was issued.
+// been False for at least build.FailureRetention() — the timer starts at
+// cond.LastTransitionTime (when the template actually went unclonable), NOT
+// Status.CompletionTime (when the build finished, which can be months
+// earlier and would otherwise erase the grace period entirely). That mirrors
+// how failureCleanupDelay anchors Failed-build retention on CompletionTime
+// because for THAT path completion and the failure are the same moment; here
+// they aren't, so a different anchor is required. FailureRetention() defaults
+// to 0 (immediate cleanup) when FAILURE_RETENTION is unset, matching the
+// existing Failed-build semantics.
+//
+// A deletion this triggers is logged, published as a Kubernetes Event on the
+// build, and counted in buildsDeletedUnclonable — a mass flip (e.g. every
+// pre-existing unclonable build on a fleet transitioning at once right after
+// this feature ships) must be distinguishable from user-initiated deletes
+// without grepping logs. Returns true if a delete was issued.
 func (r *VirtualMachineBuildReconciler) deleteIfUnclonableTooLong(ctx context.Context, vmBuild *v1alpha1.VirtualMachineBuild) (bool, error) {
 	logger := logf.FromContext(ctx)
 
@@ -1001,11 +1037,17 @@ func (r *VirtualMachineBuildReconciler) deleteIfUnclonableTooLong(ctx context.Co
 		return false, nil
 	}
 
+	reason := fmt.Sprintf("template unclonable since %s (retention %s): %s",
+		cond.LastTransitionTime.Format(time.RFC3339), build.FailureRetention(), cond.Message)
 	logger.Info("Deleting build whose template has stayed unclonable past the retention window",
 		"unclonableSince", cond.LastTransitionTime, "retention", build.FailureRetention())
+	if r.Recorder != nil {
+		r.Recorder.Eventf(vmBuild, nil, corev1.EventTypeWarning, "TemplateUnclonableCleanup", "Delete", reason)
+	}
 	if err := r.Delete(ctx, vmBuild); err != nil && !errors.IsNotFound(err) {
 		return false, fmt.Errorf("deleting unclonable build: %w", err)
 	}
+	buildsDeletedUnclonable.Inc()
 	return true, nil
 }
 

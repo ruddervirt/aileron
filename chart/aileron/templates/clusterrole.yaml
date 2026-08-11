@@ -232,6 +232,16 @@ rules:
     verbs:
       - create
       - patch
+  # events.k8s.io: Events — the new events API controller-runtime's
+  # mgr.GetEventRecorder uses (distinct from the legacy core/v1 Events
+  # rule above, which only covers record.EventRecorder callers)
+  - apiGroups:
+      - events.k8s.io
+    resources:
+      - events
+    verbs:
+      - create
+      - patch
   # Core: Pods/exec for disk reader
   - apiGroups:
       - ""

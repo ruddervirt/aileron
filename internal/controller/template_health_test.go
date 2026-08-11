@@ -19,9 +19,11 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	v1alpha1 "github.com/ruddervirt/aileron/api/v1alpha1"
 	"github.com/ruddervirt/aileron/internal/build"
 	"github.com/ruddervirt/aileron/internal/clone"
@@ -31,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -286,6 +289,72 @@ func buildWithClonableCondition(status metav1.ConditionStatus, howLongAgo time.D
 		LastTransitionTime: metav1.NewTime(time.Now().Add(-howLongAgo)),
 	}}
 	return b
+}
+
+// TestDeleteIfUnclonableTooLong_AnchorsOnConditionNotCompletionTime guards the
+// exact regression this function exists to avoid: a build can complete
+// (Status.CompletionTime) months before its template ever goes unclonable —
+// a template is typically reaped long after the build that produced it
+// finished. Anchoring retention on CompletionTime instead of the Clonable
+// condition's LastTransitionTime would make FAILURE_RETENTION nearly always
+// negative in practice, deleting on the very first reconcile with no grace
+// period at all. This build has a CompletionTime from 90 days ago but a
+// Clonable transition from one minute ago; it must survive the full
+// retention window.
+func TestDeleteIfUnclonableTooLong_AnchorsOnConditionNotCompletionTime(t *testing.T) {
+	t.Setenv("FAILURE_RETENTION", "10m")
+	vmBuild := buildWithClonableCondition(metav1.ConditionFalse, time.Minute)
+	oldCompletion := metav1.NewTime(time.Now().Add(-90 * 24 * time.Hour))
+	vmBuild.Status.CompletionTime = &oldCompletion
+
+	c := fake.NewClientBuilder().WithScheme(templateHealthScheme(t)).WithObjects(vmBuild).Build()
+	r := &VirtualMachineBuildReconciler{Client: c, Scheme: c.Scheme()}
+
+	deleted, err := r.deleteIfUnclonableTooLong(context.Background(), vmBuild)
+	if err != nil {
+		t.Fatalf("deleteIfUnclonableTooLong: %v", err)
+	}
+	if deleted {
+		t.Fatal("deleted = true, want false — a 90-day-old CompletionTime must not shortcut the 10m retention window; only the Clonable transition time (1m ago) should count")
+	}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: thBuildName, Namespace: thBuildNS}, &v1alpha1.VirtualMachineBuild{}); err != nil {
+		t.Fatalf("build should still exist: %v", err)
+	}
+}
+
+// TestDeleteIfUnclonableTooLong_EmitsEventAndMetric guards the audit trail: a
+// mass deletion (every pre-existing unclonable build flipping at once right
+// after this feature ships) must be distinguishable from a user-initiated
+// delete without grepping controller logs.
+func TestDeleteIfUnclonableTooLong_EmitsEventAndMetric(t *testing.T) {
+	t.Setenv("FAILURE_RETENTION", "10m")
+	before := testutil.ToFloat64(buildsDeletedUnclonable)
+
+	vmBuild := buildWithClonableCondition(metav1.ConditionFalse, time.Hour)
+	c := fake.NewClientBuilder().WithScheme(templateHealthScheme(t)).WithObjects(vmBuild).Build()
+	rec := events.NewFakeRecorder(1)
+	r := &VirtualMachineBuildReconciler{Client: c, Scheme: c.Scheme(), Recorder: rec}
+
+	deleted, err := r.deleteIfUnclonableTooLong(context.Background(), vmBuild)
+	if err != nil {
+		t.Fatalf("deleteIfUnclonableTooLong: %v", err)
+	}
+	if !deleted {
+		t.Fatal("deleted = false, want true")
+	}
+
+	select {
+	case ev := <-rec.Events:
+		if !strings.Contains(ev, "TemplateUnclonableCleanup") {
+			t.Errorf("event = %q, want it to carry reason TemplateUnclonableCleanup", ev)
+		}
+	default:
+		t.Error("no Event recorded, want one distinguishing this from a user-initiated delete")
+	}
+
+	if after := testutil.ToFloat64(buildsDeletedUnclonable); after != before+1 {
+		t.Errorf("buildsDeletedUnclonable = %v, want %v", after, before+1)
+	}
 }
 
 func TestDeleteIfUnclonableTooLong_DeletesPastRetention(t *testing.T) {

@@ -228,6 +228,7 @@ func main() {
 		Scheme:      mgr.GetScheme(),
 		RESTConfig:  mgr.GetConfig(),
 		BuildLimits: buildLimits,
+		Recorder:    mgr.GetEventRecorder("virtualmachinebuild-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "VirtualMachineBuild")
 		os.Exit(1)
