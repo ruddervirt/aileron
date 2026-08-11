@@ -209,14 +209,14 @@ func (t *TemplateProvisioner) convertToTemplate(ctx context.Context, build *v1al
 
 		// Clear VMI annotations (KubeOVN provider annotations, etc.) but
 		// regenerate the hook sidecar annotation so clones use custom OVMF
-		// firmware. Regenerated (not copied verbatim from the build VM) so
-		// the persisted template can never carry the build's --floppy
-		// enablement signal forward — floppy is build-only, and clones
-		// derive their own hook annotation from this template's PVC mount
-		// (RewireVMVolumes/ensureVirtualMachine), never from an injected
-		// floppy device.
+		// firmware. Floppy injection is gated purely by floppy.img's presence
+		// on the efivars PVC (see cmd/sidecar/main.go), and
+		// EnsureFloppyCleanup has already deleted that file from this PVC
+		// during CapturingDisks — before this build ever reaches
+		// TemplateProvisioning — so there's no floppy signal left to forward
+		// into the template regardless of what this annotation contains.
 		const hookAnnotation = "hooks.kubevirt.io/hookSidecars"
-		hookJSON, err := BuildHookSidecarsAnnotation(BuildID(build), vmSpec, false)
+		hookJSON, err := BuildHookSidecarsAnnotation(BuildID(build), vmSpec)
 		if err != nil {
 			return fmt.Errorf("building template hook sidecar annotation: %w", err)
 		}

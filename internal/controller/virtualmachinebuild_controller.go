@@ -1326,9 +1326,37 @@ type capturingHandler struct {
 }
 
 func (h *capturingHandler) Handle(ctx context.Context, vmBuild *v1alpha1.VirtualMachineBuild) (v1alpha1.BuildPhase, error) {
+	logger := logf.FromContext(ctx)
+
 	// Clean up the relay pod.
 	relayMgr := &build.RelayPodManager{Client: h.client}
 	_ = relayMgr.CleanupRelayPod(ctx, vmBuild)
+
+	// Delete floppy.img from any VM's EFI PVC before templating. The efivars
+	// PVC is reused verbatim by the persisted template and restored verbatim
+	// into every clone, and floppy injection in the sidecar hook is gated
+	// purely by that file's presence — so it must be gone before this build
+	// can advance to TemplateProvisioning, or every template/clone would
+	// also get a phantom floppy device. Gated the same way the Building
+	// phase gates on floppyReady (see buildingHandler.Handle above).
+	floppyCleaned := true
+	for i := range vmBuild.Spec.VMs {
+		vmSpec := &vmBuild.Spec.VMs[i]
+		if vmSpec.Floppy == nil {
+			continue
+		}
+		if err := build.EnsureFloppyCleanup(ctx, h.client, vmBuild, vmSpec); err != nil {
+			return v1alpha1.BuildPhaseCapturingDisks, fmt.Errorf("ensuring floppy cleanup for VM %s: %w", vmSpec.Name, err)
+		}
+		ready, err := build.IsFloppyCleanupReady(ctx, h.client, vmBuild, vmSpec)
+		if err != nil {
+			return v1alpha1.BuildPhaseFailed, fmt.Errorf("checking floppy cleanup for VM %s: %w", vmSpec.Name, err)
+		}
+		if !ready {
+			logger.Info("Waiting for floppy image cleanup", "vm", vmSpec.Name)
+			floppyCleaned = false
+		}
+	}
 
 	capturer := &build.DiskCapturer{Client: h.client}
 	allCaptured := true
@@ -1355,7 +1383,7 @@ func (h *capturingHandler) Handle(ctx context.Context, vmBuild *v1alpha1.Virtual
 		}
 	}
 
-	if allCaptured {
+	if allCaptured && floppyCleaned {
 		return v1alpha1.BuildPhaseTemplateProvisioning, nil
 	}
 

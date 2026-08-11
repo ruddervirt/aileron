@@ -613,6 +613,15 @@ what a [`VirtualMachineClone`](#clones-virtualmachineclone)'s
   fails immediately otherwise.
 - `cloudInit` is only attached when the field is present at all; an empty
   `{}` is enough, but omitting it entirely skips the cloud-init disk.
+- **A provisioner that domain-joins a Windows VM breaks the SSH communicator
+  for every step after it**, unless `communicator.sshUsername` is qualified.
+  Once `Add-Computer` completes, Windows resolves a bare username (e.g.
+  `skills`) against the AD domain instead of the local machine's own account
+  database, so a local account that authenticated fine pre-join starts
+  failing with a generic "unknown username or bad password" — the local
+  account and password haven't changed. Qualify the username as
+  `.\<username>` (always means "local machine," regardless of domain
+  membership) so it keeps working both before and after the join.
 
 ### Troubleshooting pointers
 

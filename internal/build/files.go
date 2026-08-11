@@ -36,6 +36,12 @@ func FloppyJobName(buildID, vmName string) string {
 	return fmt.Sprintf("%s-floppy-job-%s", buildID, vmName)
 }
 
+// FloppyCleanupJobName returns the Job name for deleting a VM's floppy disk
+// image from its EFI PVC.
+func FloppyCleanupJobName(buildID, vmName string) string {
+	return fmt.Sprintf("%s-floppy-clean-%s", buildID, vmName)
+}
+
 // EnsureFilesConfigMap creates a ConfigMap from inline spec.files entries.
 // URL-sourced files are not included — they are downloaded by init containers
 // at the point of use (relay pod, etc.).
@@ -363,6 +369,151 @@ func IsFloppyImageReady(ctx context.Context, k8sClient client.Client, build *v1a
 		}
 		if c.Type == batchv1.JobFailed && c.Status == corev1.ConditionTrue {
 			return false, fmt.Errorf("floppy image Job failed: %s", c.Message)
+		}
+	}
+	return false, nil
+}
+
+// EnsureFloppyCleanup creates a Job that deletes floppy.img from the EFI PVC.
+// Floppy injection in the sidecar hook is gated purely by that file's
+// presence (see cmd/sidecar/main.go), and the EFI PVC's bytes are reused
+// verbatim by the persisted template and restored verbatim into every clone
+// (see internal/build/template.go, internal/clone/snapshot.go), so the file
+// must be physically removed once the build no longer needs it — otherwise
+// every template and clone would also get a phantom floppy device injected.
+func EnsureFloppyCleanup(ctx context.Context, k8sClient client.Client, build *v1alpha1.VirtualMachineBuild, vmSpec *v1alpha1.BuildVM) error {
+	if vmSpec.Floppy == nil || len(vmSpec.Floppy.Files) == 0 {
+		return nil
+	}
+
+	logger := log.FromContext(ctx)
+	buildID := BuildID(build)
+	buildNS := BuildNS(build)
+	jobName := FloppyCleanupJobName(buildID, vmSpec.Name)
+	efiPVC := efiPVCName(buildID, vmSpec.Name)
+
+	// If a previous reconcile observed the cleanup Job's success, the PVC is
+	// stamped as cleaned. Skip Job creation so it doesn't get recreated after
+	// TTLSecondsAfterFinished GC.
+	cleaned, err := efiPVCHasAnnotation(ctx, k8sClient, build, vmSpec, annotationFloppyCleaned)
+	if err != nil {
+		return fmt.Errorf("checking floppy PVC cleaned annotation: %w", err)
+	}
+	if cleaned {
+		return nil
+	}
+
+	existingJob := &batchv1.Job{}
+	err = k8sClient.Get(ctx, types.NamespacedName{Name: jobName, Namespace: buildNS}, existingJob)
+	if errors.IsNotFound(err) {
+		logger.Info("Creating floppy cleanup Job", "name", jobName)
+		job := &batchv1.Job{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      jobName,
+				Namespace: buildNS,
+				Labels: map[string]string{
+					LabelBuildID:        buildID,
+					LabelBuild:          build.Name,
+					LabelBuildNamespace: build.Namespace,
+					LabelComponent:      "floppy-cleanup",
+					LabelVM:             vmSpec.Name,
+				},
+			},
+			Spec: batchv1.JobSpec{
+				TTLSecondsAfterFinished: ttl(),
+				Template: corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{
+						Labels: map[string]string{
+							LabelBuildID:   buildID,
+							LabelComponent: "floppy-cleanup",
+						},
+					},
+					Spec: corev1.PodSpec{
+						RestartPolicy: corev1.RestartPolicyNever,
+						Containers: []corev1.Container{{
+							Name:    "rm-floppy",
+							Image:   "busybox:stable",
+							Command: []string{"sh", "-c", "rm -f /efi/floppy.img"},
+							VolumeMounts: []corev1.VolumeMount{
+								{Name: "efi", MountPath: "/efi"},
+							},
+						}},
+						Volumes: []corev1.Volume{
+							{
+								Name: "efi",
+								VolumeSource: corev1.VolumeSource{
+									PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+										ClaimName: efiPVC,
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+
+		if secrets := os.Getenv("IMAGE_PULL_SECRETS"); secrets != "" {
+			for s := range strings.SplitSeq(secrets, ",") {
+				s = strings.TrimSpace(s)
+				if s != "" {
+					job.Spec.Template.Spec.ImagePullSecrets = append(
+						job.Spec.Template.Spec.ImagePullSecrets,
+						corev1.LocalObjectReference{Name: s},
+					)
+				}
+			}
+		}
+
+		if err := k8sClient.Create(ctx, job); err != nil && !errors.IsAlreadyExists(err) {
+			return fmt.Errorf("creating floppy cleanup Job: %w", err)
+		}
+	} else if err != nil {
+		return fmt.Errorf("checking floppy cleanup Job: %w", err)
+	}
+
+	return nil
+}
+
+// IsFloppyCleanupReady checks whether the floppy cleanup Job has completed.
+// On first observation of a successful Job, stamps the EFI PVC with an
+// annotation so future reconciles can short-circuit even after the Job is
+// garbage-collected by TTLSecondsAfterFinished. Returns true immediately
+// (nothing to clean up) when the VM never had a floppy.
+func IsFloppyCleanupReady(ctx context.Context, k8sClient client.Client, build *v1alpha1.VirtualMachineBuild, vmSpec *v1alpha1.BuildVM) (bool, error) {
+	if vmSpec.Floppy == nil || len(vmSpec.Floppy.Files) == 0 {
+		return true, nil
+	}
+
+	cleaned, err := efiPVCHasAnnotation(ctx, k8sClient, build, vmSpec, annotationFloppyCleaned)
+	if err != nil {
+		return false, fmt.Errorf("checking floppy PVC cleaned annotation: %w", err)
+	}
+	if cleaned {
+		return true, nil
+	}
+
+	jobName := FloppyCleanupJobName(BuildID(build), vmSpec.Name)
+	buildNS := BuildNS(build)
+
+	job := &batchv1.Job{}
+	err = k8sClient.Get(ctx, types.NamespacedName{Name: jobName, Namespace: buildNS}, job)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("checking floppy cleanup Job: %w", err)
+	}
+
+	for _, c := range job.Status.Conditions {
+		if c.Type == batchv1.JobComplete && c.Status == corev1.ConditionTrue {
+			if err := markEFIPVCAnnotation(ctx, k8sClient, build, vmSpec, annotationFloppyCleaned); err != nil {
+				return true, fmt.Errorf("marking floppy PVC cleaned: %w", err)
+			}
+			return true, nil
+		}
+		if c.Type == batchv1.JobFailed && c.Status == corev1.ConditionTrue {
+			return false, fmt.Errorf("floppy cleanup Job failed: %s", c.Message)
 		}
 	}
 	return false, nil

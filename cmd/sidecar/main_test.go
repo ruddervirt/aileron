@@ -5,6 +5,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"testing"
 
@@ -170,5 +171,21 @@ func TestOnDefineDomainFloppyEnabled(t *testing.T) {
 	}
 	if !strings.Contains(out, `device="floppy"`) {
 		t.Errorf("floppy device not injected despite injectFloppy=true; got:\n%s", out)
+	}
+}
+
+func TestFloppyPresent(t *testing.T) {
+	dir := t.TempDir()
+	missing := dir + "/floppy.img"
+
+	if floppyPresent(missing) {
+		t.Errorf("floppyPresent(%q) = true, want false (file does not exist)", missing)
+	}
+
+	if err := os.WriteFile(missing, []byte("fat12"), 0o644); err != nil {
+		t.Fatalf("writing test floppy image: %v", err)
+	}
+	if !floppyPresent(missing) {
+		t.Errorf("floppyPresent(%q) = false, want true (file exists)", missing)
 	}
 }

@@ -366,7 +366,7 @@ func (v *VMBooter) buildVM(build *v1alpha1.VirtualMachineBuild, vmSpec *v1alpha1
 
 	// Build VMI template annotations — add hook sidecars for EFI and/or floppy.
 	vmiAnnotations := podAnnotations
-	hookJSON, err := BuildHookSidecarsAnnotation(BuildID(build), vmSpec, vmSpec.Floppy != nil)
+	hookJSON, err := BuildHookSidecarsAnnotation(BuildID(build), vmSpec)
 	if err != nil {
 		return nil, fmt.Errorf("building hook sidecar annotation: %w", err)
 	}

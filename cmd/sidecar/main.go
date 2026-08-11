@@ -42,11 +42,8 @@ const (
 
 func main() {
 	var vmiJSON, domainXML string
-	var floppyEnabled bool
 	pflag.StringVar(&vmiJSON, "vmi", "", "VMI spec in JSON format")
 	pflag.StringVar(&domainXML, "domain", "", "Domain spec in XML format")
-	pflag.BoolVar(&floppyEnabled, "floppy", false,
-		"enable floppy device injection (requires floppy.img on the mounted efivars PVC)")
 	pflag.Parse()
 
 	logger := log.New(os.Stderr, "aileron-sidecar: ", 0)
@@ -55,20 +52,17 @@ func main() {
 		logger.Fatal("--domain is required")
 	}
 
-	// Floppy injection requires both the explicit flag AND the image file
-	// present on the mounted EFI PVC. The flag is the primary, positive
-	// gate — a clone's hook annotation never sets it, so a clone can never
-	// inject a floppy device even though the image bytes may still be
-	// physically present (inherited via a snapshot-restored PVC). File
-	// presence remains a secondary guard against a build that requested the
-	// flag before the image job finished.
-	injectFloppy := false
-	if floppyEnabled {
-		if _, err := os.Stat(floppySidecarPath); err == nil {
-			injectFloppy = true
-		} else {
-			logger.Printf("--floppy set but %s not found, skipping floppy injection", floppySidecarPath)
-		}
+	// KubeVirt's sidecar-shim only recognizes --version on its own command
+	// line and rejects anything else before ever exec'ing this binary, so
+	// there's no CLI flag channel to signal floppy enablement through the
+	// hookSidecars annotation. File presence on the mounted efivars PVC is
+	// therefore the only usable gate — the build pipeline is responsible for
+	// deleting floppy.img before a build is converted into a template (see
+	// internal/build.EnsureFloppyCleanup) so that gate stays closed for every
+	// template and clone.
+	injectFloppy := floppyPresent(floppySidecarPath)
+	if !injectFloppy {
+		logger.Printf("%s not found, skipping floppy injection", floppySidecarPath)
 	}
 
 	result, err := onDefineDomain(logger, []byte(domainXML), injectFloppy)
@@ -77,6 +71,12 @@ func main() {
 	}
 
 	fmt.Print(result)
+}
+
+// floppyPresent reports whether a floppy image exists at path.
+func floppyPresent(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 func onDefineDomain(logger *log.Logger, domainXML []byte, injectFloppy bool) (string, error) {

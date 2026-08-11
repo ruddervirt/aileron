@@ -32,6 +32,9 @@ const (
 	// Job's success — the populator runs exactly once per build.
 	annotationEFIPopulated    = "aileron.ruddervirt.io/efi-populated"
 	annotationFloppyPopulated = "aileron.ruddervirt.io/floppy-populated"
+	// annotationFloppyCleaned marks the EFI PVC as having had floppy.img
+	// removed by EnsureFloppyCleanup, once and durably (see IsFloppyCleanupReady).
+	annotationFloppyCleaned = "aileron.ruddervirt.io/floppy-cleaned"
 
 	valueTrue = "true"
 )
@@ -308,21 +311,24 @@ func IsEFIFirmwareReady(ctx context.Context, c client.Client, build *v1alpha1.Vi
 // BuildHookSidecarsAnnotation returns the JSON value for the
 // hooks.kubevirt.io/hookSidecars annotation. Uses the aileron/sidecar image
 // which contains a compiled Go binary for domain XML modification.
-// Returns empty string if no hooks are needed. floppyEnabled controls
-// whether the sidecar is told to inject the floppy device — callers must
-// pass false for anything that is not the live build VM (e.g. the persisted
-// template), so the enablement signal never survives past the build.
-func BuildHookSidecarsAnnotation(buildID string, vmSpec *v1alpha1.BuildVM, floppyEnabled bool) (string, error) {
+// Returns empty string if no hooks are needed.
+//
+// args is always just ["--version", "v1alpha2"] — KubeVirt's sidecar-shim
+// only recognizes --version on its own command line and rejects any other
+// flag before ever exec'ing the hook binary, so there's no way to pass a
+// floppy-enablement signal through this annotation. Floppy injection is
+// instead gated purely by file presence on the mounted efivars PVC (see
+// cmd/sidecar/main.go); EnsureFloppyCleanup deletes floppy.img before a
+// build is converted into a template, so that gate stays closed for every
+// template and clone even though this annotation is otherwise identical
+// between build, template, and clone.
+func BuildHookSidecarsAnnotation(buildID string, vmSpec *v1alpha1.BuildVM) (string, error) {
 	if vmSpec.EFIFirmware == nil && vmSpec.Floppy == nil {
 		return "", nil
 	}
 
-	args := []string{"--version", "v1alpha2"}
-	if floppyEnabled {
-		args = append(args, "--floppy")
-	}
 	hook := map[string]any{
-		"args":  args,
+		"args":  []string{"--version", "v1alpha2"},
 		"image": sidecarImage(),
 	}
 
