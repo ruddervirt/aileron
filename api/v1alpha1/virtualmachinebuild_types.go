@@ -920,6 +920,33 @@ type VirtualMachineBuildStatus struct {
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// templateHealth records whether this build's template can still be cloned.
+	// Maintained continuously after the build succeeds; absent means never evaluated.
+	// +optional
+	TemplateHealth *TemplateHealth `json:"templateHealth,omitempty"`
+}
+
+// TemplateHealth records the result of the continuous post-Succeeded check of
+// whether a build's template can still back a clone.
+type TemplateHealth struct {
+	// clonable is the authoritative answer: whether a clone dispatched now
+	// would clear the Validating phase and provision its volumes.
+	Clonable bool `json:"clonable"`
+
+	// missing names each absent or unusable resource as "<kind>/<name>",
+	// e.g. "template-vm/anaheim", "pvc/vm-euj68y17eukbnv2-out-anaheim",
+	// "volumesnapshot/…-snap".
+	// +optional
+	Missing []string `json:"missing,omitempty"`
+
+	// message is the human-readable reason, verbatim from the same error text
+	// a failing clone would surface.
+	// +optional
+	Message string `json:"message,omitempty"`
+
+	// checkedAt is when this verdict was last computed.
+	CheckedAt metav1.Time `json:"checkedAt"`
 }
 
 // Condition types for VirtualMachineBuild.
@@ -928,6 +955,7 @@ const (
 	ConditionAllVMsReady         = "AllVMsReady"
 	ConditionDisksCapture        = "DisksCaptured"
 	ConditionTemplateProvisioned = "TemplateProvisioned"
+	ConditionClonable            = "Clonable"
 )
 
 // +kubebuilder:object:root=true

@@ -94,18 +94,7 @@ func (s *SnapshotManager) BuildInitialVolumeStates(ctx context.Context, template
 			}
 			volName, _, _ := unstructured.NestedString(volMap, "name")
 
-			// Find the PVC name from dataVolume, persistentVolumeClaim, or dataVolumeRef.
-			pvcName := ""
-			if dv, ok := volMap["dataVolume"]; ok {
-				if dvMap, ok := dv.(map[string]any); ok {
-					pvcName, _, _ = unstructured.NestedString(dvMap, "name")
-				}
-			} else if pvc, ok := volMap["persistentVolumeClaim"]; ok {
-				if pvcMap, ok := pvc.(map[string]any); ok {
-					pvcName, _, _ = unstructured.NestedString(pvcMap, "claimName")
-				}
-			}
-
+			pvcName := pvcNameForVolume(volMap)
 			if pvcName == "" {
 				continue
 			}
@@ -216,6 +205,26 @@ func (s *SnapshotManager) BuildInitialVolumeStates(ctx context.Context, template
 	return states, nil
 }
 
+// pvcNameForVolume returns the PVC name backing a template VM volume,
+// resolved from either dataVolume.name or persistentVolumeClaim.claimName.
+// Returns "" when the volume isn't PVC-backed (e.g. containerDisk).
+func pvcNameForVolume(volMap map[string]any) string {
+	if dv, ok := volMap["dataVolume"]; ok {
+		if dvMap, ok := dv.(map[string]any); ok {
+			if name, _, _ := unstructured.NestedString(dvMap, "name"); name != "" {
+				return name
+			}
+		}
+	}
+	if pvc, ok := volMap["persistentVolumeClaim"]; ok {
+		if pvcMap, ok := pvc.(map[string]any); ok {
+			name, _, _ := unstructured.NestedString(pvcMap, "claimName")
+			return name
+		}
+	}
+	return ""
+}
+
 // hasEFIVarsPVCMount reports whether the template VM's VMI hookSidecars
 // annotation declares a PVC mount — the actual signal that an efivars-style
 // PVC exists for this VM (set whenever the build used efiFirmware and/or
@@ -307,10 +316,10 @@ func (s *SnapshotManager) EnsureBaseSnapshotReady(ctx context.Context, cloneName
 			return false, fmt.Errorf("getting source PVC %s for snapshot labels: %w", state.SourcePVCName, err)
 		}
 		snapLabels := map[string]string{
-			"ruddervirt.io/base-snapshot": "true",
-			"ruddervirt.io/source-pvc":    state.SourcePVCName,
-			"ruddervirt.io/source-pv":     state.SourcePVName,
-			"ruddervirt.io/source-vm":     state.SourceVMName,
+			LabelBaseSnapshot:         "true",
+			LabelSourcePVC:            state.SourcePVCName,
+			"ruddervirt.io/source-pv": state.SourcePVName,
+			"ruddervirt.io/source-vm": state.SourceVMName,
 		}
 		for _, key := range []string{"ruddervirt.io/build-id", "ruddervirt.io/build", "ruddervirt.io/build-namespace"} {
 			if v := srcPVC.Labels[key]; v != "" {
@@ -396,10 +405,10 @@ func (s *SnapshotManager) findReusableSnapshot(ctx context.Context, state *v1alp
 	if err := s.Client.List(ctx, list,
 		client.InNamespace(templateNamespace),
 		client.MatchingLabels{
-			"ruddervirt.io/base-snapshot": "true",
-			"ruddervirt.io/source-pvc":    state.SourcePVCName,
-			"ruddervirt.io/source-pv":     state.SourcePVName,
-			"ruddervirt.io/source-vm":     state.SourceVMName,
+			LabelBaseSnapshot:         "true",
+			LabelSourcePVC:            state.SourcePVCName,
+			"ruddervirt.io/source-pv": state.SourcePVName,
+			"ruddervirt.io/source-vm": state.SourceVMName,
 		},
 	); err != nil {
 		return "", fmt.Errorf("listing snapshots: %w", err)

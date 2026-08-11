@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -34,13 +35,17 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlcontroller "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	v1alpha1 "github.com/ruddervirt/aileron/api/v1alpha1"
 	"github.com/ruddervirt/aileron/internal/build"
+	"github.com/ruddervirt/aileron/internal/clone"
 	"github.com/ruddervirt/aileron/internal/namespace"
 	"github.com/ruddervirt/aileron/internal/network"
 )
@@ -316,6 +321,10 @@ func (r *VirtualMachineBuildReconciler) Reconcile(ctx context.Context, req ctrl.
 				logger.Info("Build resources still being deleted, requeueing", "remaining", remaining)
 				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 			}
+		}
+
+		if vmBuild.Status.Phase == v1alpha1.BuildPhaseSucceeded {
+			return r.reconcileTemplateHealth(ctx, vmBuild)
 		}
 		return ctrl.Result{}, nil
 	}
@@ -892,6 +901,135 @@ func (r *VirtualMachineBuildReconciler) recoverConflict() ctrl.Result {
 	return ctrl.Result{Requeue: true}
 }
 
+// templateHealthRequeue is the backstop poll interval for re-checking a
+// Succeeded build's template health. Deletions of the template VM, its
+// output PVC, or its base VolumeSnapshot are caught immediately via the
+// Watches in SetupWithManager; this requeue only covers cases the watch
+// can't see (e.g. a PV disappearing out from under a still-Bound PVC).
+const templateHealthRequeue = 20 * time.Minute
+
+// reconcileTemplateHealth evaluates and, if changed, persists whether a
+// Succeeded build's template can still back a clone, then deletes the build
+// once it has stayed unclonable past the retention window — otherwise a
+// fleet of dead templates accumulates forever (only a clone attempt, which
+// may never come, would ever surface the problem). It never runs for
+// non-Succeeded builds — see the BuildPhaseSucceeded guard at the call site.
+func (r *VirtualMachineBuildReconciler) reconcileTemplateHealth(ctx context.Context, vmBuild *v1alpha1.VirtualMachineBuild) (ctrl.Result, error) {
+	logger := logf.FromContext(ctx)
+
+	health, err := clone.CheckTemplateHealth(ctx, r.Client, vmBuild.Namespace, vmBuild.Name)
+	if err != nil {
+		logger.Error(err, "checking template health")
+		return ctrl.Result{RequeueAfter: requeueInterval}, nil
+	}
+
+	// current tracks whichever object carries the up-to-date Clonable
+	// condition — vmBuild itself when the verdict didn't change, or the
+	// freshly-written latest otherwise — so the retention check below always
+	// reads an accurate LastTransitionTime regardless of which path ran.
+	current := vmBuild
+
+	if !templateHealthUnchanged(vmBuild.Status.TemplateHealth, &health) {
+		// Re-fetch the latest version before writing to avoid clobbering a
+		// concurrent reconcile's status update, mirroring failBuild's pattern.
+		key := types.NamespacedName{Name: vmBuild.Name, Namespace: vmBuild.Namespace}
+		latest := &v1alpha1.VirtualMachineBuild{}
+		if err := r.Get(ctx, key, latest); err != nil {
+			return ctrl.Result{}, fmt.Errorf("re-fetching for template health update: %w", err)
+		}
+		if latest.Status.Phase != v1alpha1.BuildPhaseSucceeded {
+			// Build regressed/advanced under us since this reconcile started; the
+			// next Succeeded-phase reconcile will re-evaluate.
+			return ctrl.Result{}, nil
+		}
+
+		latest.Status.TemplateHealth = &health
+		condStatus, reason := metav1.ConditionTrue, "TemplateClonable"
+		if !health.Clonable {
+			condStatus, reason = metav1.ConditionFalse, "TemplateUnclonable"
+		}
+		meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
+			Type:    v1alpha1.ConditionClonable,
+			Status:  condStatus,
+			Reason:  reason,
+			Message: health.Message,
+		})
+
+		if err := r.Status().Update(ctx, latest); err != nil {
+			if errors.IsConflict(err) {
+				logger.Info("Template health status update conflict, retrying")
+				return r.recoverConflict(), nil
+			}
+			return ctrl.Result{}, fmt.Errorf("updating template health status: %w", err)
+		}
+		logger.Info("Template health updated", "clonable", health.Clonable, "missing", health.Missing)
+		current = latest
+	}
+
+	deleted, err := r.deleteIfUnclonableTooLong(ctx, current)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if deleted {
+		// The Delete call set DeletionTimestamp; the resulting event re-enters
+		// Reconcile through the finalizer-driven handleDeletion path, which
+		// tears down the build's namespace/resources the same way a manual
+		// `kubectl delete vmb` would. No further requeue needed here.
+		return ctrl.Result{}, nil
+	}
+
+	return ctrl.Result{RequeueAfter: templateHealthRequeue}, nil
+}
+
+// deleteIfUnclonableTooLong deletes vmBuild once its Clonable condition has
+// been False for at least build.FailureRetention() — the same knob that
+// already governs how long Failed builds are kept around for inspection
+// before cleanup. FailureRetention() defaults to 0 (immediate cleanup) when
+// FAILURE_RETENTION is unset, matching the existing Failed-build semantics
+// in failureCleanupDelay. Returns true if a delete was issued.
+func (r *VirtualMachineBuildReconciler) deleteIfUnclonableTooLong(ctx context.Context, vmBuild *v1alpha1.VirtualMachineBuild) (bool, error) {
+	logger := logf.FromContext(ctx)
+
+	if build.DebugMode() {
+		return false, nil
+	}
+	cond := meta.FindStatusCondition(vmBuild.Status.Conditions, v1alpha1.ConditionClonable)
+	if cond == nil || cond.Status != metav1.ConditionFalse {
+		return false, nil
+	}
+	if time.Since(cond.LastTransitionTime.Time) < build.FailureRetention() {
+		return false, nil
+	}
+
+	logger.Info("Deleting build whose template has stayed unclonable past the retention window",
+		"unclonableSince", cond.LastTransitionTime, "retention", build.FailureRetention())
+	if err := r.Delete(ctx, vmBuild); err != nil && !errors.IsNotFound(err) {
+		return false, fmt.Errorf("deleting unclonable build: %w", err)
+	}
+	return true, nil
+}
+
+// templateHealthUnchanged reports whether old and new verdicts are
+// equivalent, ignoring CheckedAt — used to avoid steady status churn across
+// a fleet of healthy templates re-checked every templateHealthRequeue.
+func templateHealthUnchanged(old *v1alpha1.TemplateHealth, next *v1alpha1.TemplateHealth) bool {
+	if old == nil {
+		return false
+	}
+	if old.Clonable != next.Clonable || old.Message != next.Message {
+		return false
+	}
+	if len(old.Missing) != len(next.Missing) {
+		return false
+	}
+	for i := range old.Missing {
+		if old.Missing[i] != next.Missing[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func (r *VirtualMachineBuildReconciler) setPhaseCondition(vmBuild *v1alpha1.VirtualMachineBuild, phase v1alpha1.BuildPhase) {
 	now := metav1.Now()
 	var condType, reason, message string
@@ -923,11 +1061,45 @@ func (r *VirtualMachineBuildReconciler) setPhaseCondition(vmBuild *v1alpha1.Virt
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *VirtualMachineBuildReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	vm := &unstructured.Unstructured{}
+	vm.SetGroupVersionKind(schema.GroupVersionKind{Group: "kubevirt.io", Version: "v1", Kind: "VirtualMachine"})
+
+	snap := &unstructured.Unstructured{}
+	snap.SetGroupVersionKind(schema.GroupVersionKind{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshot"})
+
+	// Only template VMs matter for template health — build-phase VMs carry
+	// the same LabelBuild/LabelBuildNamespace labels but churn constantly
+	// while the build is still in flight, and are already reconciled every
+	// requeueInterval regardless.
+	templateVMOnly := predicate.NewPredicateFuncs(func(obj client.Object) bool {
+		return obj.GetLabels()[build.LabelComponent] == "template"
+	})
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.VirtualMachineBuild{}).
+		Watches(vm, handler.EnqueueRequestsFromMapFunc(templateResourceToBuild), builder.WithPredicates(templateVMOnly)).
+		Watches(&corev1.PersistentVolumeClaim{}, handler.EnqueueRequestsFromMapFunc(templateResourceToBuild)).
+		Watches(snap, handler.EnqueueRequestsFromMapFunc(templateResourceToBuild)).
 		Named("virtualmachinebuild").
 		WithOptions(ctrlcontroller.Options{MaxConcurrentReconciles: 10}).
 		Complete(r)
+}
+
+// templateResourceToBuild maps a template VM/PVC/VolumeSnapshot back to the
+// VirtualMachineBuild that owns it, using the build.LabelBuild /
+// build.LabelBuildNamespace labels every such resource carries — no List
+// needed (unlike vmiToClone in virtualmachineclone_controller.go, whose
+// watched objects don't carry the owning CR's own name+namespace directly).
+// Delete events retain the deleted object's labels, so a reaped template VM,
+// output PVC, or base VolumeSnapshot re-enqueues its build within seconds.
+func templateResourceToBuild(_ context.Context, obj client.Object) []ctrl.Request {
+	labels := obj.GetLabels()
+	name := labels[build.LabelBuild]
+	ns := labels[build.LabelBuildNamespace]
+	if name == "" || ns == "" {
+		return nil
+	}
+	return []ctrl.Request{{NamespacedName: types.NamespacedName{Name: name, Namespace: ns}}}
 }
 
 // =============================================================================

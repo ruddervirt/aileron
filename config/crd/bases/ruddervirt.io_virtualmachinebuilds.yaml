@@ -1189,6 +1189,37 @@ spec:
                 description: startTime is when the build started.
                 format: date-time
                 type: string
+              templateHealth:
+                description: |-
+                  templateHealth records whether this build's template can still be cloned.
+                  Maintained continuously after the build succeeds; absent means never evaluated.
+                properties:
+                  checkedAt:
+                    description: checkedAt is when this verdict was last computed.
+                    format: date-time
+                    type: string
+                  clonable:
+                    description: |-
+                      clonable is the authoritative answer: whether a clone dispatched now
+                      would clear the Validating phase and provision its volumes.
+                    type: boolean
+                  message:
+                    description: |-
+                      message is the human-readable reason, verbatim from the same error text
+                      a failing clone would surface.
+                    type: string
+                  missing:
+                    description: |-
+                      missing names each absent or unusable resource as "<kind>/<name>",
+                      e.g. "template-vm/anaheim", "pvc/vm-euj68y17eukbnv2-out-anaheim",
+                      "volumesnapshot/…-snap".
+                    items:
+                      type: string
+                    type: array
+                required:
+                - checkedAt
+                - clonable
+                type: object
               templateNamespace:
                 description: |-
                   templateNamespace is the namespace containing output PVCs and halted template VMs.
