@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"time"
 
 	v1alpha1 "github.com/ruddervirt/aileron/api/v1alpha1"
 	"github.com/ruddervirt/aileron/internal/clone"
@@ -111,6 +112,16 @@ const (
 	vmiFailed
 )
 
+// syncFailureGracePeriod bounds how long a Synchronized=False condition
+// must persist before checkVMI treats it as a terminal boot failure.
+// KubeVirt sets this condition for ordinary transient states too — most
+// commonly "PVC pending" while a rootdisk clone is still in progress — so
+// a single observation isn't enough signal to fail the whole build.
+// Genuinely permanent failures (e.g. a rejected libvirt config) still
+// surface within this window, well inside the build's overall
+// Spec.Timeout backstop.
+const syncFailureGracePeriod = 90 * time.Second
+
 func (v *VMBooter) checkVMI(ctx context.Context, name, namespace string) (vmiState, string, error) {
 	vmi := &unstructured.Unstructured{}
 	vmi.SetGroupVersionKind(schema.GroupVersionKind{
@@ -139,7 +150,15 @@ func (v *VMBooter) checkVMI(ctx context.Context, name, namespace string) (vmiSta
 	// failed." — hence the looser check. The Synchronized condition lives
 	// on the VirtualMachine in current KubeVirt versions, not the VMI, so
 	// fetch both and inspect together.
-	if state, msg := syncFailureFromConditions(vmi.Object, "VMI"); state == vmiFailed {
+	//
+	// KubeVirt also sets Synchronized=False for ordinary transient states
+	// (most commonly "PVC pending" while a rootdisk clone is still copying),
+	// so a single observation isn't proof of a permanent failure. Only
+	// escalate once the condition has persisted past syncFailureGracePeriod;
+	// otherwise fall through and keep polling like the launcher-pod/pending
+	// paths below, the same way VPC/subnet/gateway readiness is handled in
+	// network.go.
+	if state, msg, since := syncFailureFromConditions(vmi.Object, "VMI"); state == vmiFailed && time.Since(since) >= syncFailureGracePeriod {
 		return state, msg, nil
 	}
 	vm := &unstructured.Unstructured{}
@@ -147,7 +166,7 @@ func (v *VMBooter) checkVMI(ctx context.Context, name, namespace string) (vmiSta
 		Group: "kubevirt.io", Version: "v1", Kind: "VirtualMachine",
 	})
 	if err := v.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, vm); err == nil {
-		if state, msg := syncFailureFromConditions(vm.Object, "VM"); state == vmiFailed {
+		if state, msg, since := syncFailureFromConditions(vm.Object, "VM"); state == vmiFailed && time.Since(since) >= syncFailureGracePeriod {
 			return state, msg, nil
 		}
 	}
@@ -161,12 +180,17 @@ func (v *VMBooter) checkVMI(ctx context.Context, name, namespace string) (vmiSta
 }
 
 // syncFailureFromConditions inspects a KubeVirt resource's status.conditions
-// for a Synchronized=False entry that signals a permanent configuration
-// rejection from libvirt (rather than a transient state). A non-empty
-// message is required to filter out brief False windows during normal
-// VMI initialization. The kind argument is prefixed onto the returned
-// message so the caller knows whether the VM or VMI surfaced the error.
-func syncFailureFromConditions(obj map[string]any, kind string) (vmiState, string) {
+// for a Synchronized=False entry that may signal a permanent configuration
+// rejection from libvirt (rather than a transient state, e.g. "PVC pending"
+// while a rootdisk clone is still in progress). A non-empty message is
+// required to filter out brief False windows during normal VMI
+// initialization. The kind argument is prefixed onto the returned message
+// so the caller knows whether the VM or VMI surfaced the error. The
+// returned time.Time is the condition's lastTransitionTime, letting the
+// caller apply a grace period before treating this as terminal; if the
+// field is missing or unparseable it defaults to time.Now(), which starts
+// that grace period fresh rather than failing fast.
+func syncFailureFromConditions(obj map[string]any, kind string) (vmiState, string, time.Time) {
 	conditions, _, _ := unstructured.NestedSlice(obj, "status", "conditions")
 	for _, c := range conditions {
 		cond, ok := c.(map[string]any)
@@ -177,10 +201,16 @@ func syncFailureFromConditions(obj map[string]any, kind string) (vmiState, strin
 		condStatus, _, _ := unstructured.NestedString(cond, "status")
 		msg, _, _ := unstructured.NestedString(cond, "message")
 		if condType == "Synchronized" && condStatus == "False" && msg != "" {
-			return vmiFailed, fmt.Sprintf("%s Synchronized=False: %s", kind, msg)
+			since := time.Now()
+			if raw, found, _ := unstructured.NestedString(cond, "lastTransitionTime"); found {
+				if t, err := time.Parse(time.RFC3339, raw); err == nil {
+					since = t
+				}
+			}
+			return vmiFailed, fmt.Sprintf("%s Synchronized=False: %s", kind, msg), since
 		}
 	}
-	return vmiPending, ""
+	return vmiPending, "", time.Time{}
 }
 
 // checkLauncherPod inspects the virt-launcher pod's container statuses for

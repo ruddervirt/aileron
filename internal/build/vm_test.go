@@ -1,12 +1,17 @@
 package build
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	v1alpha1 "github.com/ruddervirt/aileron/api/v1alpha1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func TestCPUCores(t *testing.T) {
@@ -71,5 +76,128 @@ func TestBuildVMOmitsInvisibleAnnotationWhenFalse(t *testing.T) {
 	annotations, _, _ := unstructured.NestedStringMap(vm.Object, "metadata", "annotations")
 	if _, ok := annotations[v1alpha1.AnnotationInvisible]; ok {
 		t.Errorf("metadata.annotations[%s] should be absent, got %q", v1alpha1.AnnotationInvisible, annotations[v1alpha1.AnnotationInvisible])
+	}
+}
+
+// synchronizedFalseCondition builds a status.conditions entry matching what
+// KubeVirt sets when it can't sync a VMI/VM yet, e.g. "PVC pending" while a
+// rootdisk clone is still copying.
+func synchronizedFalseCondition(msg string, lastTransitionTime *time.Time) map[string]any {
+	cond := map[string]any{
+		"type":    "Synchronized",
+		"status":  "False",
+		"message": msg,
+	}
+	if lastTransitionTime != nil {
+		cond["lastTransitionTime"] = lastTransitionTime.Format(time.RFC3339)
+	}
+	return cond
+}
+
+func TestSyncFailureFromConditions_RecentTransitionReturnsThatTime(t *testing.T) {
+	since := time.Now().Add(-30 * time.Second)
+	obj := map[string]any{
+		"status": map[string]any{
+			"conditions": []any{synchronizedFalseCondition("PVC pending", &since)},
+		},
+	}
+	state, msg, got := syncFailureFromConditions(obj, "VMI")
+	if state != vmiFailed {
+		t.Fatalf("state = %v, want vmiFailed", state)
+	}
+	if msg != "VMI Synchronized=False: PVC pending" {
+		t.Errorf("msg = %q", msg)
+	}
+	// RFC3339 truncates sub-second precision, so allow either direction.
+	if diff := got.Sub(since); diff < -time.Second || diff > time.Second {
+		t.Errorf("since = %v, want ~%v", got, since)
+	}
+}
+
+func TestSyncFailureFromConditions_MissingTimestampDefaultsToNow(t *testing.T) {
+	obj := map[string]any{
+		"status": map[string]any{
+			"conditions": []any{synchronizedFalseCondition("PVC pending", nil)},
+		},
+	}
+	before := time.Now()
+	state, _, got := syncFailureFromConditions(obj, "VMI")
+	after := time.Now()
+	if state != vmiFailed {
+		t.Fatalf("state = %v, want vmiFailed", state)
+	}
+	if got.Before(before) || got.After(after) {
+		t.Errorf("since = %v, want between %v and %v", got, before, after)
+	}
+}
+
+func TestSyncFailureFromConditions_NotFailedWhenTrueOrEmptyMessage(t *testing.T) {
+	trueCond := map[string]any{"type": "Synchronized", "status": "True", "message": ""}
+	emptyMsgCond := map[string]any{"type": "Synchronized", "status": "False", "message": ""}
+	for name, obj := range map[string]map[string]any{
+		"status-true":   {"status": map[string]any{"conditions": []any{trueCond}}},
+		"empty-message": {"status": map[string]any{"conditions": []any{emptyMsgCond}}},
+		"no-conditions": {"status": map[string]any{}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			state, msg, since := syncFailureFromConditions(obj, "VMI")
+			if state != vmiPending || msg != "" || !since.IsZero() {
+				t.Errorf("got (%v, %q, %v), want (vmiPending, \"\", zero)", state, msg, since)
+			}
+		})
+	}
+}
+
+var vmiGVK = schema.GroupVersionKind{Group: "kubevirt.io", Version: "v1", Kind: "VirtualMachineInstance"}
+
+// vmiScheme extends vmScheme (defined in template_test.go) with the
+// VirtualMachineInstance kind, since checkVMI fetches both.
+func vmiScheme(t *testing.T) *runtime.Scheme {
+	t.Helper()
+	s := vmScheme(t)
+	s.AddKnownTypeWithName(vmiGVK, &unstructured.Unstructured{})
+	s.AddKnownTypeWithName(schema.GroupVersionKind{
+		Group: vmiGVK.Group, Version: vmiGVK.Version, Kind: vmiGVK.Kind + "List",
+	}, &unstructured.UnstructuredList{})
+	return s
+}
+
+func vmiWithSyncFailure(name, namespace, msg string, since time.Time) *unstructured.Unstructured {
+	vmi := &unstructured.Unstructured{}
+	vmi.SetGroupVersionKind(vmiGVK)
+	vmi.SetName(name)
+	vmi.SetNamespace(namespace)
+	_ = unstructured.SetNestedSlice(vmi.Object, []any{synchronizedFalseCondition(msg, &since)}, "status", "conditions")
+	return vmi
+}
+
+func TestCheckVMI_SynchronizedFalseWithinGracePeriod_StaysPending(t *testing.T) {
+	vmi := vmiWithSyncFailure("workstation1", "vm-test1", "PVC pending", time.Now().Add(-30*time.Second))
+	cl := fake.NewClientBuilder().WithScheme(vmiScheme(t)).WithObjects(vmi).Build()
+	v := &VMBooter{Client: cl}
+
+	state, msg, err := v.checkVMI(context.Background(), "workstation1", "vm-test1")
+	if err != nil {
+		t.Fatalf("checkVMI: %v", err)
+	}
+	if state != vmiPending {
+		t.Errorf("state = %v, want vmiPending (still within grace period), msg=%q", state, msg)
+	}
+}
+
+func TestCheckVMI_SynchronizedFalseBeyondGracePeriod_Fails(t *testing.T) {
+	vmi := vmiWithSyncFailure("workstation1", "vm-test1", "PVC pending", time.Now().Add(-5*time.Minute))
+	cl := fake.NewClientBuilder().WithScheme(vmiScheme(t)).WithObjects(vmi).Build()
+	v := &VMBooter{Client: cl}
+
+	state, msg, err := v.checkVMI(context.Background(), "workstation1", "vm-test1")
+	if err != nil {
+		t.Fatalf("checkVMI: %v", err)
+	}
+	if state != vmiFailed {
+		t.Errorf("state = %v, want vmiFailed (beyond grace period)", state)
+	}
+	if msg != "VMI Synchronized=False: PVC pending" {
+		t.Errorf("msg = %q", msg)
 	}
 }
