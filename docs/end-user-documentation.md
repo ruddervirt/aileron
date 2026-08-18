@@ -1,158 +1,94 @@
-# Aileron end-user documentation
+```markdown
+# Aileron End-User Documentation
 
-This is the end-user reference for the resources Aileron exposes: how to write
-them, what their status fields mean, and the conventions (labels, naming,
-lifecycle) that connect them together. It's written for anything that creates
-or watches these resources programmatically — a fleet-management controller,
-a UI backend, or a human operator — not just for someone hand-writing YAML.
+This guide covers the creation of resources with Aileron, checking their status, and understanding their connections using labels and naming conventions. It's meant for users writing YAML programmatically, such as fleet-management controllers, UI backends, or operators.
 
-**The schema Aileron installs is authoritative for field-level validation**
-(required/optional fields, types, enums, defaults). If you have direct
-Kubernetes access, `kubectl explain <kind>.spec` shows it; if you're
-integrating through a UI or API layer instead, that layer should surface
-equivalent validation. This guide covers what the schema alone can't:
-workflow, cross-resource relationships, label/annotation conventions, and
-status/phase semantics.
+**Aileron installs a schema to validate fields** (required/optional fields, types, enums, defaults). With Kubernetes access, `kubectl explain <kind>.spec` provides this information. UI or API integrations should offer similar validation. This guide also covers workflow, resource relationships, label/annotation conventions, and status/phase semantics.
 
-All resources below are versioned as `ruddervirt.io/v1alpha1` — the `v1alpha1`
-suffix is not decorative. The API can change without notice between releases.
+Resources are versioned as `ruddervirt.io/v1alpha1`. The `v1alpha1` suffix indicates potential API changes between releases.
 
-## The four resources at a glance
+## The Four Resources at a Glance
 
 | Kind | Short name | Purpose |
 |---|---|---|
-| [`VirtualMachineBuild`](#modules-virtualmachinebuild) | `vmb` | Boot, provision, and capture a VM (or set of VMs) as a golden template |
-| [`VirtualMachineClone`](#clones-virtualmachineclone) | `vmc` | Instantiate a template into running VMs via CSI snapshot cloning |
-| [`GradeRequest`](#grading-graderequest) | `gr` | Run commands over a VM's serial console and record the results |
-| `VirtualMachineNamespace` | — | Internal bookkeeping; see [Namespace model](#namespace-model) |
+| [`VirtualMachineBuild`](#modules-virtualmachinebuild) | `vmb` | Create, provision, and capture a VM or VMs as a template |
+| [`VirtualMachineClone`](#clones-virtualmachineclone) | `vmc` | Create running VMs from a template via CSI snapshot cloning |
+| [`GradeRequest`](#grading-graderequest) | `gr` | Execute commands on a VM's serial console and log the results |
+| `VirtualMachineNamespace` | — | Internal use; see [Namespace model](#namespace-model) |
 
-Jump to: [Shared concepts](#shared-concepts) ·
-[Modules](#modules-virtualmachinebuild) · [Clones](#clones-virtualmachineclone) ·
-[Grading](#grading-graderequest) · [End-to-end walkthrough](#end-to-end-walkthrough)
+Jump to: [Shared concepts](#shared-concepts) · [Modules](#modules-virtualmachinebuild) · [Clones](#clones-virtualmachineclone) · [Grading](#grading-graderequest) · [End-to-end walkthrough](#end-to-end-walkthrough)
 
 ---
 
-## Shared concepts
+## Shared Concepts
 
-### Resource naming & IDs
+### Resource Naming & IDs
 
-Builds and clones each get a generated ID once the controller first reconciles
-them, and every resource they own is labeled and named from that ID:
+Builds and clones get an ID when first processed, and resources they own are labeled and named with that ID:
 
-- A build's ID is `status.buildID`; its namespace defaults to a generated
-  `vm-{uid-hash}` (override with `spec.namespace`, or change the prefix with
-  `spec.namespacePrefix`, default `"vm-"`).
-- A clone's ID is `status.cloneID`; its namespace defaults to `ns-{uid-hash}`
-  (override with `spec.namespace`/`spec.namespacePrefix`, default `"ns-"`).
+- A build's ID is `status.buildID`; its namespace defaults to `vm-{uid-hash}` (can be changed with `spec.namespace` or `spec.namespacePrefix`, default `"vm-"`).
+- A clone's ID is `status.cloneID`; its namespace defaults to `ns-{uid-hash}` (can be changed with `spec.namespace`/`spec.namespacePrefix`, default `"ns-"`).
 
-All builds and clones share one Kubernetes namespace (`ruddervirt-system` by
-default) — isolation between them is by label, not by Kubernetes namespace
-boundary, unless you explicitly set `spec.namespace`.
+All builds and clones share a single Kubernetes namespace (`ruddervirt-system` by default) — they are isolated by label, unless `spec.namespace` is explicitly set.
 
-### Namespace model
+### Namespace Model
 
-A build's namespace and a clone's namespace play different roles:
+Build and clone namespaces have different functions:
 
-1. **Build namespace** — where the build VMs run while booting/provisioning.
-2. On success, that *same* namespace becomes the **template namespace**
-   (`status.templateNamespace == status.buildNamespace`): it now holds halted
-   template VMs and their captured disks instead of running build VMs.
-3. **Clone namespace** — a separate namespace created per `VirtualMachineClone`,
-   holding the running, cloned VMs. It never overlaps with a build or template
-   namespace.
+1. **Build namespace** — where build VMs operate during boot/provisioning.
+2. On success, becomes the **template namespace** (`status.templateNamespace == status.buildNamespace`), holding the halted template VMs and disks.
+3. **Clone namespace** — separate namespace for each `VirtualMachineClone`, containing running cloned VMs. Does not overlap with a build or template namespace.
 
-Each build/clone's resources are also logically grouped by a
-`VirtualMachineNamespace` resource — internal bookkeeping, not something you
-typically author directly. It records `spec.ownerRef` (kind/name/namespace
-of the owning Build or Clone), `status.phase` (`Active`/`Deleting`), and
-`status.vms[]`. If your integration needs to enumerate active builds/clones
-cluster-wide without watching both resource types separately, watching
-`VirtualMachineNamespace` is a cheaper way to do it.
+Each build or clone's resources are grouped by a `VirtualMachineNamespace` resource — used for internal tracking, not direct authoring. It records `spec.ownerRef` (kind/name/namespace of the owning Build or Clone), `status.phase` (`Active`/`Deleting`), and `status.vms[]`. To list active builds/clones cluster-wide without watching both resource types, monitor `VirtualMachineNamespace`.
 
-### Network model
+### Network Model
 
-Builds and clones share the same network types: a `network` block of
-`vpcs[]` and `subnets[]`, and per-VM `nics[]` that reference a subnet by
-name.
+Builds and clones share network types: a `network` block of `vpcs[]` and `subnets[]`, with per-VM `nics[]` referring to a subnet by name.
 
-- **You usually don't need to declare a network at all.** Omit `network` and
-  `nics` entirely and a VPC, subnet, and NIC are auto-created for you — this
-  is the common single-VM, single-network case.
-- Declare `network.vpcs[]` explicitly only when you need **multiple isolated
-  VPCs** in one build (e.g. testing cross-VPC isolation) or need to name a
-  subnet so multiple VMs can share it.
-- `vpc.internet: true` enables NAT egress and public DNS (8.8.8.8, 1.1.1.1)
-  for that VPC. Defaults to `false`.
+- **Usually, no network declaration is needed.** Omit `network` and `nics`, and a VPC, subnet, and NIC are auto-created — typical for a single-VM, single-network setup.
+- Declare `network.vpcs[]` only when multiple isolated VPCs are needed in one build or to name a subnet for sharing among multiple VMs.
+- `vpc.internet: true` enables NAT egress and public DNS. Defaults to `false`.
 - `subnet.cidr` is required; `subnet.dhcp` defaults to `true`.
-- `subnet.unmanaged: true` turns the subnet into a bare L2 segment owned by a
-  **guest gateway VM** (e.g. pfSense, or a Windows DC serving DHCP) instead of
-  KubeOVN. Aileron still realizes it as an OVN logical switch (for cross-node
-  L2 and VPC isolation), but disables OVN's own DHCP and relocates the
-  mandatory OVN gateway port to the second-to-last usable IP so it can't
-  collide with the guest's own gateway address. Requires a `/29` or wider
-  CIDR. Because an unmanaged segment has no DHCP until the guest gateway VM
-  itself is up, builds that need to provision *into* an unmanaged segment
-  typically use [`buildOverrides`](#build-overrides) to run it as managed
-  during the build only.
-- `nics[].slot` (1-9) pins a NIC to a specific PCI slot so the same logical
-  NIC keeps the same PCI address across a build, its layered children, and
-  every clone. Without it, the guest sees "new" hardware whenever a
-  downstream spec reorders the NIC list — and OS state that's bound to NIC
-  identity (Windows adapter renames, static IPs, DHCP reservations by MAC,
-  AD DNS bindings) ends up on the wrong interface. Pin `slot` on any NIC
-  whose identity needs to survive layering or cloning.
-- `nics[].model` defaults to `e1000` (broad in-box guest driver support,
-  useful for Windows installs with no netkvm driver yet). Switch to `virtio`
-  once the guest has the driver loaded, for higher throughput.
+- `subnet.unmanaged: true` changes the subnet to a L2 segment owned by a **guest gateway VM** (like pfSense or Windows DC for DHCP) instead of KubeOVN. Aileron still uses it as an OVN logical switch but disables OVN's own DHCP and relocates the OVN gateway port. Requires a `/29` or wider CIDR. For unmanaged segments needing DHCP during build, use [`buildOverrides`](#build-overrides) to manage it temporarily.
+- `nics[].slot` (1-9) assigns a NIC to a PCI slot, keeping the same address across builds and clones. Without it, reordering NICs in downstream specs can confuse OS state tied to NIC identity.
+- `nics[].model` defaults to `e1000`; switch to `virtio` after the guest loads the driver for better performance.
 
-A build's template VMs carry their resolved network topology as an
-annotation; clones read it to recreate equivalent VPCs/subnets under their
-own ID unless `spec.network` overrides it.
+A build's template VMs carry resolved network topology as an annotation; clones recreate equivalent VPCs/subnets unless `spec.network` overrides it.
 
-### Labels & annotations reference
+### Labels & Annotations Reference
 
-None of this is visible in the OpenAPI schema — it's the connective tissue
-between resources, and the most useful thing an automation consumer can key
-off of.
+This isn't in the OpenAPI schema — it's the linkage between resources, essential for automation.
 
 | Key | Meaning | Set on |
 |---|---|---|
-| `ruddervirt.io/build-id` | The owning build's `status.buildID` | All resources created by a build |
+| `ruddervirt.io/build-id` | The build's `status.buildID` | Resources from a build |
 | `ruddervirt.io/build` | The `VirtualMachineBuild` name | Build resources |
 | `ruddervirt.io/build-namespace` | The build's namespace | Build resources |
-| `ruddervirt.io/vm` | The VM's short name (`spec.vms[].name` / `spec.templateName` VM name) | VMs, associated PVCs |
-| `ruddervirt.io/clone` | The owning clone's `status.cloneID` | All resources created by a clone |
-| `ruddervirt.io/component` | Resource role, e.g. `"template"`, `"clone"` | Build/clone-owned resources |
-| `ruddervirt.io/os` | `"windows"` or `"linux"`, derived from the VM's provisioning shell type | Every VM (build, template, and clone) — this is what [grading](#grading-graderequest) reads to pick a console protocol |
-| `ruddervirt.io/owner-kind`, `-name`, `-namespace` | Identifies the owning `VirtualMachineBuild`/`VirtualMachineClone` | `VirtualMachineNamespace` |
-| `ruddervirt.io/origin` | Caller-supplied free-form attribution string, propagated verbatim from a Build/Clone onto its VMs; Aileron never interprets it | VMs, if set on the parent Build/Clone |
-| `ruddervirt.io/age-anchor` | Effective creation time used for watchdog age checks (see [TTL & expiry](#ttl--expiry-model)) | Cloned VMs |
-| `ruddervirt.io/expires-at` | Absolute RFC3339 timestamp a cloned VM becomes eligible for watchdog deletion | Cloned VMs |
-| `ruddervirt.io/grade-request`, `-target-vm`, `-target-namespace` | Identify which `GradeRequest` and target VM a grader Job belongs to | Grader Jobs |
-| `ruddervirt.io/invisible` | Set to `"true"` when the source `BuildVM`'s `invisible` is true; excludes the VM from the console/VNC UI | VMs, templates, and clones, when the source `spec.vms[].invisible` is `true` |
+| `ruddervirt.io/vm` | The VM's short name (`spec.vms[].name` / `spec.templateName`) | VMs, associated PVCs |
+| `ruddervirt.io/clone` | The clone's `status.cloneID` | Resources from a clone |
+| `ruddervirt.io/component` | Resource role, like `"template"`, `"clone"` | Resources from builds/clones |
+| `ruddervirt.io/os` | `"windows"` or `"linux"`, based on the VM's provisioning shell type | Every VM — read by [grading](#grading-graderequest) for console protocol selection |
+| `ruddervirt.io/owner-kind`, `-name`, `-namespace` | The owning `VirtualMachineBuild`/`VirtualMachineClone` | `VirtualMachineNamespace` |
+| `ruddervirt.io/origin` | Free-form attribution string from a Build/Clone; not interpreted by Aileron | VMs, if set on the parent Build/Clone |
+| `ruddervirt.io/age-anchor` | Creation time for watchdog age checks (see [TTL & expiry](#ttl--expiry-model)) | Cloned VMs |
+| `ruddervirt.io/expires-at` | RFC3339 timestamp when a cloned VM can be deleted by watchdog | Cloned VMs |
+| `ruddervirt.io/grade-request`, `-target-vm`, `-target-namespace` | Identify `GradeRequest` and target VM for a grader Job | Grader Jobs |
+| `ruddervirt.io/invisible` | Set to `"true"` for `invisible` `BuildVM`s; hides VM from console/VNC UI | VMs, templates, and clones, when the source `spec.vms[].invisible` is `true` |
 
-### Status contract
+### Status Contract
 
-All four resources follow the same pattern:
+All resources follow a similar pattern:
 
-- **`status.phase`** is a coarse state machine (see each resource's phase
-  table below) — good for a progress indicator, but treat it as a hint, not a
-  stable enum to branch deep logic on.
-- **`status.conditions[]`** are standard Kubernetes `metav1.Condition`
-  entries (`type`, `status`, `reason`, `message`, `lastTransitionTime`).
-  Prefer checking conditions by `type` over string-matching a phase — new
-  phases may be added over time, but a given condition `type` (e.g.
-  `"Ready"`) is a more stable integration point.
+- **`status.phase`** is a broad status indicator — useful for progress, but not a stable enum for deep logic.
+- **`status.conditions[]`** are Kubernetes `metav1.Condition` entries. Check conditions by `type` rather than phase string-matching, as phases may change over time, but a condition `type` (like `"Ready"`) is more stable.
 
 ---
 
 ## Modules (`VirtualMachineBuild`)
 
-A module build boots one or more VMs, runs provisioners against them, shuts
-them down, and captures their disks as a template. Clones later instantiate
-that template.
+A module build boots VMs, provisions them, shuts them down, and captures their disks as a template for cloning.
 
-### Minimal example
+### Minimal Example
 
 ```yaml
 apiVersion: ruddervirt.io/v1alpha1
@@ -187,119 +123,50 @@ spec:
   timeout: 30m
 ```
 
-No `network` or `nics` block is needed for the common case — a VPC, subnet,
-and NIC are auto-created. `resources.cpu`/`resources.memory` are the only
-required resource fields; quote fractional CPU values (e.g. `"0.5"`) since
-YAML would otherwise parse them as a float.
+For common cases, omit `network` or `nics`. Auto-creation covers a VPC, subnet, and NIC. `resources.cpu`/`resources.memory` are mandatory; quote fractional CPU values (`"0.5"`) to avoid YAML parsing as floats.
 
-### Anatomy of a build spec
+### Anatomy of a Build Spec
 
-**Source** (`spec.vms[].source`) — exactly one of:
+**Source** (`spec.vms[].source`) — one of these options:
 - `url` — CDI imports a disk image from HTTP(S).
 - `sourcePvc` — an existing PVC (`name`/`namespace`) with a base image.
-- `containerDisk` — a container image reference holding a disk image.
-- `buildRef` — the output of a prior, **`Succeeded`** `VirtualMachineBuild`
-  (`name`, optional `namespace`, and `vmName` if the parent build has more
-  than one VM). This is how [layered builds](#layered-builds) chain.
-- `blank: true` — an empty disk, paired with `isos[]` for OS installs from
-  install media.
+- `containerDisk` — a container image reference with a disk image.
+- `buildRef` — output of a successful `VirtualMachineBuild` (`name`, `namespace`, and optionally `vmName` if multiple VMs exist). Used for [layered builds](#layered-builds).
+- `blank: true` — an empty disk, combined with `isos[]` for installs from media.
 
-**Resources & disks** — `resources.cpu`/`resources.memory` are required.
-`disks[]` defaults to a single 20Gi virtio disk if omitted. The **first disk
-is always the boot disk** and receives the source image; additional disks are
-created blank (except under `buildRef`, where the boot disk is inherited from
-the parent, so *every* listed disk is treated as an additional blank data
-disk). `disks[].bus` defaults to `virtio`; keep the boot disk on a bootable
-bus — `usb` is non-bootable, removable media, useful only for data/transfer
-disks.
+**Resources & Disks** — `resources.cpu`/`resources.memory` are required. `disks[]` defaults to a single 20Gi virtio disk if not specified. The **first disk is the boot disk** and receives the source image; extra disks are blank (under `buildRef`, the boot disk is inherited, so all listed disks are new blank data disks). `disks[].bus` defaults to `virtio`; boot disks need a bootable bus — `usb` is for data/transfer only.
 
-**Networking** — see [Network model](#network-model). Per-VM NIC assignments
-live at `spec.vms[].nics[]`.
+**Networking** — see [Network model](#network-model). Per-VM NICs are in `spec.vms[].nics[]`.
 
-**Communicator & cloud-init** — `communicator.shell` (`bash` or
-`powershell`, default `bash`) determines how files are uploaded and scripts
-executed over SSH; set it to `powershell` for Windows guests. A cloud-init
-disk is only attached when `cloudInit` is present at all — omit the field
-entirely (not just leave it empty) to skip it, e.g. for ISO installs that use
-`bootCommand`/preseed instead.
+**Communicator & Cloud-Init** — `communicator.shell` (`bash` or `powershell`, default `bash`) decides how files/scripts run over SSH; use `powershell` for Windows. A cloud-init disk is only attached if `cloudInit` is present — omit it entirely for setups like ISO installs that use `bootCommand`/preseed.
 
-**Boot command** — `bootCommand[]` sends Packer-compatible VNC keystrokes
-(`<enter>`, `<tab>`, `<wait20>`, etc.) before provisioning starts. Needed for
-OS installs with no cloud-init path (see the [ISO install
-example](#example-iso-install)); combine with `httpDirectory` and
-`{{ .HTTPIP }}`/`{{ .HTTPPort }}` template variables to point an installer at
-a preseed/answer file served from `spec.files`.
+**Boot Command** — `bootCommand[]` sends Packer-compatible VNC keystrokes (`<enter>`, `<tab>`, etc.) before provisioning. Needed for OS installs without cloud-init. Use with `httpDirectory` and `{{ .HTTPIP }}`/`{{ .HTTPPort }}` variables for pointing to preseed/answer files served from `spec.files`.
 
-**Provisioners** — an ordered list, each running to completion before the
-next starts:
-- `shell` — **`inline` is a single multi-line script string** (`inline: |`),
-  not a list of commands. Each shell provisioner runs one script; use
-  multiple provisioner steps for multiple scripts, since variables and shell
-  state do not carry across steps. `env` sets environment variables;
-  `executeCommand` overrides the command wrapper (`{{ .Command }}`
-  placeholder) — useful for e.g. `sudo -S` with a piped password.
-- `file` — uploads a file from `source` (ConfigMap/Secret) or `fileRef`
-  (references `spec.files[].name`) to `destination`.
-- `reboot` — reboots and waits for SSH to drop then come back; `command`
-  overrides the default (`sudo reboot` / `shutdown /r /f /t 0`).
-- `windows-update` — runs the same search/filter/reboot loop as
-  `packer-plugin-windows-update`; `searchCriteria` defaults to recommended
-  updates, `filters[]` are PowerShell filter expressions
-  (`"include:..."`/`"exclude:..."`), `updateLimit` caps updates per cycle
-  (default 1000).
-- `handbuild` — pauses the build for a human to interact with the VM over
-  VNC; resumes on a "continue" signal. `instructions` is shown in the UI
-  while paused.
+**Provisioners** — an ordered list, each completes before the next starts:
+- `shell` — **`inline` is a single script string** (`inline: |`), not command list. Each shell provisioner runs one script; use multiple provisioners for multiple scripts, as variables and state don't carry over. `env` sets environment vars; `executeCommand` changes the command wrapper (useful for `sudo -S` with a piped password).
+- `file` — uploads a file from `source` (ConfigMap/Secret) or `fileRef` (references `spec.files[].name`) to `destination`.
+- `reboot` — reboots and waits for SSH to drop and return; `command` changes the default (`sudo reboot`/`shutdown /r /f /t 0`).
+- `windows-update` — runs a search/filter/reboot loop like `packer-plugin-windows-update`; `searchCriteria` defaults to recommended updates, `filters[]` are PowerShell expressions (`"include:..."`/`"exclude:..."`), `updateLimit` caps updates per cycle (default 1000).
+- `handbuild` — pauses the build for manual VM interaction over VNC; resumes on a "continue" signal. `instructions` are shown in the UI while paused.
 
-**ISOs & floppy** — `isos[]` are cached as `ReadOnlyMany` PVCs keyed by
-`checksum` (or the URL's hash if omitted) and shared across builds. `floppy`
-attaches a disk built from named `spec.files[]` entries — useful for Windows
-`Autounattend.xml`/sysprep or BIOS-era boot configuration. `floppy` is
-**build-only**: it has no clone-side equivalent, and floppy content is never
-attached to a cloned VM, regardless of what the template build used.
+**ISOs & Floppy** — `isos[]` are cached `ReadOnlyMany` PVCs keyed by `checksum` (or URL hash if omitted) and shared across builds. `floppy` attaches a disk from named `spec.files[]` entries — useful for Windows `Autounattend.xml`/sysprep or BIOS boot config. **Build-only**: not attached to cloned VMs.
 
-**Invisible VMs** — `spec.vms[].invisible` (default `false`) excludes a VM
-from the console/VNC-access UI, for the build itself and for every clone made
-from its template. Use it for infrastructure VMs nobody should click into
-(e.g. a webserver just serving a page, a DC/DNS box) — grading, networking,
-and provisioning are unaffected. Clones cannot override it; a clone always
-inherits invisibility from its template.
+**Invisible VMs** — `spec.vms[].invisible` (default `false`) hides a VM from the console/UI but doesn't affect grading or networking. Clones inherit invisibility; they can't change it.
 
-**Files** (`spec.files[]`) — named blobs (`inline` or `url`), referenced by
-name from `httpDirectory`, `floppy`, or a `file` provisioner's `fileRef`. The
-`name` doubles as the served filename/URL path, so use fully-qualified names
-(e.g. `"Autounattend.xml"`, `"preseed.cfg"`).
+**Files** (`spec.files[]`) — named blobs (`inline` or `url`) referenced by `httpDirectory`, `floppy`, or a `file` provisioner's `fileRef`. `name` serves as filename/URL path, so use specific names (e.g. `"Autounattend.xml"`, `"preseed.cfg"`).
 
 <a id="build-overrides"></a>
-**Build overrides** (`spec.buildOverrides`) — settings that apply **only**
-during the build phase; the base spec values are what get captured into the
-template and inherited by clones. Use this when the build phase legitimately
-needs to differ from what clones should see:
-- `vpcs[].internet` — give a VPC temporary internet access to install
-  packages, without clones inheriting it.
-- `subnets[].unmanaged` — force an `unmanaged` segment to be **managed**
-  during the build (see [Network model](#network-model)), so provisioning has
-  DHCP/relay reachability before the guest's own gateway exists; clones still
-  get the unmanaged segment.
-- `vms[].resources` / `vms[].nics` — extra CPU for compilation, or an
-  extra provisioning-only NIC, without either leaking into the template. When
-  a build-override NIC's `name` matches a base-spec NIC, its identity fields
-  (`mac`/`slot`/`model`) are always taken from the base NIC — this is
-  deliberate, since a build that ran with different NIC identity would bake
-  guest state (e.g. a Windows DHCP reservation bound to a MAC) that no clone
-  could ever match.
+**Build Overrides** (`spec.buildOverrides`) — settings for the build phase only; base spec values go into the template and are used by clones. Useful when build needs differ from what clones require:
+- `vpcs[].internet` — temporary internet access for package installs, not inherited by clones.
+- `subnets[].unmanaged` — force an `unmanaged` segment to be **managed** during the build (see [Network model](#network-model)), so DHCP/relay is reachable before the guest's gateway exists; clones get the unmanaged segment.
+- `vms[].resources` / `vms[].nics` — extra build CPU or a NIC without affecting the template. If a build-override NIC matches a base-spec NIC by `name`, identity fields (`mac`/`slot`/`model`) are taken from the base NIC to avoid guest state issues.
 
-**Multi-VM builds** — `spec.vms[]` accepts more than one entry; all VMs boot
-and provision in parallel and can reach each other by name over the shared
-network.
+**Multi-VM Builds** — `spec.vms[]` allows multiple entries; all VMs boot and provision in parallel and can communicate over the shared network.
 
 <a id="layered-builds"></a>
-**Layered builds** — chain builds with `source.buildRef`, referencing a
-`Succeeded` parent by name (and `vmName` if it had multiple VMs). The parent
-build's captured disk becomes this build's boot disk; provisioners in the
-child build run against files/state left by the parent.
+**Layered Builds** — chain builds with `source.buildRef`, referencing a `Succeeded` parent by name (and `vmName` if multiple VMs exist). The parent's captured disk becomes the boot disk; child build provisioners run against the parent's state.
 
-### Example: multi-VM build
+### Example: Multi-VM Build
 
 ```yaml
 apiVersion: ruddervirt.io/v1alpha1
@@ -360,7 +227,7 @@ spec:
   timeout: 30m
 ```
 
-### Example: layered build
+### Example: Layered Build
 
 ```yaml
 apiVersion: ruddervirt.io/v1alpha1
@@ -402,7 +269,7 @@ spec:
   timeout: 30m
 ```
 
-### Example: ISO install
+### Example: ISO Install
 
 ```yaml
 apiVersion: ruddervirt.io/v1alpha1
@@ -458,7 +325,7 @@ spec:
   timeout: 90m
 ```
 
-### Example: Windows handbuild
+### Example: Windows Handbuild
 
 ```yaml
 apiVersion: ruddervirt.io/v1alpha1
@@ -491,7 +358,7 @@ spec:
   timeout: 60m
 ```
 
-### Example: network topology with an unmanaged segment
+### Example: Network Topology with an Unmanaged Segment
 
 ```yaml
 apiVersion: ruddervirt.io/v1alpha1
@@ -533,7 +400,7 @@ spec:
   timeout: 45m
 ```
 
-### Example: build overrides for internet access
+### Example: Build Overrides for Internet Access
 
 ```yaml
 apiVersion: ruddervirt.io/v1alpha1
@@ -572,79 +439,52 @@ spec:
   timeout: 30m
 ```
 
-### Build lifecycle & status
+### Build Lifecycle & Status
 
 `status.phase`:
 
 | Phase | Meaning |
 |---|---|
-| `Pending` | Build accepted, not yet started |
+| `Pending` | Build accepted, not started |
 | `Networking` | Creating VPCs/subnets |
 | `Building` | VMs booting and provisioning |
-| `CapturingDisks` | Provisioning finished; shutting down and snapshotting disks |
-| `TemplateProvisioning` | Creating halted template VMs from captured disks |
-| `Succeeded` | Template namespace ready — clones can reference this build's `status.buildID`-derived name |
-| `Failed` | Build failed; see `status.message` and per-VM `status.vmStatuses[].message` |
+| `CapturingDisks` | Provisioning done; shutting down and snapshotting disks |
+| `TemplateProvisioning` | Creating halted template VMs from disks |
+| `Succeeded` | Template namespace ready — clones can use this build's `status.buildID`-derived name |
+| `Failed` | Build failed; check `status.message` and per-VM `status.vmStatuses[].message` |
 
-Per-VM `status.vmStatuses[].phase` (`VMPhase`): `Pending` →
-`SourceImporting` → `Booting` → `BootCommand` → `Provisioning` →
-`ShuttingDown` → `DiskCaptured` → `Succeeded`/`Failed`. If a build hangs, this
-is the first place to look — a stall in `Booting`/`BootCommand` usually means
-the VM never came up or `bootCommand` keystrokes didn't match what the
-console expected; check `status.vmStatuses[].provisionerResults[]` for
-per-step outcomes once provisioning starts.
+Per-VM `status.vmStatuses[].phase` (`VMPhase`): `Pending` → `SourceImporting` → `Booting` → `BootCommand` → `Provisioning` → `ShuttingDown` → `DiskCaptured` → `Succeeded`/`Failed`. For a stalled build, check here first — `Booting`/`BootCommand` may indicate the VM didn't come up or `bootCommand` mismatched console expectations; check `status.vmStatuses[].provisionerResults[]` for step outcomes after provisioning starts.
 
-Conditions: `NetworkReady`, `AllVMsReady`, `DisksCaptured`,
-`TemplateProvisioned`.
+Conditions: `NetworkReady`, `AllVMsReady`, `DisksCaptured`, `TemplateProvisioned`.
 
-On success, `status.templateNamespace` (equal to `status.buildNamespace`) is
-what a [`VirtualMachineClone`](#clones-virtualmachineclone)'s
-`spec.templateName` resolves against (as `vm-{templateName}`).
+On success, `status.templateNamespace` (equal to `status.buildNamespace`) is what a [`VirtualMachineClone`](#clones-virtualmachineclone)'s `spec.templateName` resolves against (as `vm-{templateName}`).
 
-### Common gotchas
+### Common Gotchas
 
-- `shell.inline` is a **string**, not a YAML list — `inline: |` followed by
-  a script, not `inline: ["cmd1", "cmd2"]`.
-- Quote fractional CPU (`cpu: "0.5"`), and keep the boot disk on a bootable
-  bus (`virtio` — not `usb`).
-- Pin `nics[].slot` on any interface whose in-guest identity needs to
-  survive a layered build or a clone.
-- `source.buildRef` requires the parent build to already be `Succeeded` — it
-  fails immediately otherwise.
-- `cloudInit` is only attached when the field is present at all; an empty
-  `{}` is enough, but omitting it entirely skips the cloud-init disk.
-- **A provisioner that domain-joins a Windows VM breaks the SSH communicator
-  for every step after it**, unless `communicator.sshUsername` is qualified.
-  Once `Add-Computer` completes, Windows resolves a bare username (e.g.
-  `skills`) against the AD domain instead of the local machine's own account
-  database, so a local account that authenticated fine pre-join starts
-  failing with a generic "unknown username or bad password" — the local
-  account and password haven't changed. Qualify the username as
-  `.\<username>` (always means "local machine," regardless of domain
-  membership) so it keeps working both before and after the join.
+- `shell.inline` is a **string**, not a YAML list — use `inline: |` followed by a script, not `inline: ["cmd1", "cmd2"]`.
+- Quote fractional CPU (`cpu: "0.5"`), and keep the boot disk on a bootable bus (`virtio`, not `usb`).
+- Pin `nics[].slot` for any interface whose in-guest identity must survive a layered build or clone.
+- `source.buildRef` requires the parent build to be `Succeeded` — it fails immediately otherwise.
+- `cloudInit` is attached only if the field is present; an empty `{}` works, but omit it entirely to skip the cloud-init disk.
+- **A provisioner joining a Windows VM to a domain breaks the SSH communicator for later steps**, unless `communicator.sshUsername` is qualified. After `Add-Computer`, Windows resolves a bare username (e.g., `skills`) against AD instead of the local database, causing failures with a generic "unknown username or bad password," even though the account and password are unchanged. Qualify the username as `.\<username>` for local machine resolution, ensuring continuity before and after the join.
 
-### Troubleshooting pointers
+### Troubleshooting Pointers
 
-- `spec.timeout` (default `30m`) bounds the *entire* build; `spec.retries`
-  (default `0`) controls automatic retry on failure.
-- `spec.isoCacheTTL` (default 24h) controls how long imported ISO PVCs are
-  kept before cleanup — increase it if repeated builds reuse the same ISO.
-- `provisioners[].stepTimeout` bounds an individual step; unset, a step can
-  run until the build-level timeout expires.
+- `spec.timeout` (default `30m`) limits the entire build; `spec.retries` (default `0`) manages automatic retries on failure.
+- `spec.isoCacheTTL` (default 24h) determines how long ISO PVCs are kept before cleanup — increase if repeated builds reuse the same ISO.
+- `provisioners[].stepTimeout` limits an individual step; if unset, a step can run until the build-level timeout expires.
 
-### See also
+### See Also
 
-[Clones](#clones-virtualmachineclone) (what a `Succeeded` build feeds into) ·
-[Shared concepts](#shared-concepts) · [End-to-end walkthrough](#end-to-end-walkthrough)
+[Clones](#clones-virtualmachineclone) (what a `Succeeded` build feeds into) · [Shared concepts](#shared-concepts) · [End-to-end walkthrough](#end-to-end-walkthrough)
 
 ---
 
 ## Clones (`VirtualMachineClone`)
 
-A clone instantiates a build's template into new, running VMs by taking CSI
-volume snapshots of the template's disks and restoring them into fresh PVCs.
+A clone turns a build's template into running VMs by taking CSI volume snapshots of the template's disks and restoring them as new PVCs.
 
-### Minimal example
+### Minimal Example
 
 ```yaml
 apiVersion: ruddervirt.io/v1alpha1
@@ -657,54 +497,27 @@ spec:
   timeout: 15m
 ```
 
-### Anatomy of a clone spec
+### Anatomy of a Clone Spec
 
-**`templateName`** — resolves to the template namespace `vm-{templateName}`,
-which must contain a `Succeeded` build's halted template VMs (see
-[Namespace model](#namespace-model)).
+**`templateName`** — resolves to the template namespace `vm-{templateName}`, which must contain `Succeeded` build's halted template VMs (see [Namespace model](#namespace-model)).
 
-**Namespace naming** — `spec.namespace` overrides the auto-generated clone
-namespace; `spec.namespacePrefix` (default `"ns-"`) controls the generated
-name's prefix (`ns-{uid-hash}`).
+**Namespace Naming** — `spec.namespace` overrides the auto-generated clone namespace; `spec.namespacePrefix` (default `"ns-"`) affects the generated name's prefix (`ns-{uid-hash}`).
 
-**Network overrides** — omit `spec.network` to inherit the template's
-topology as-is (see [Network model](#network-model)); declaring it replaces
-the topology for this clone only.
+**Network Overrides** — omit `spec.network` to inherit the template's topology; declaring it changes the topology for this clone only.
 
-**`vmOverrides[]`** — per-VM customization; `name` must match a VM name that
-exists in the template namespace. Supports overriding `nics` and `resources`.
+**`vmOverrides[]`** — per-VM customization; `name` must match an existing VM in the template namespace. Supports overriding `nics` and `resources`.
 
-**Egress gateway** — `spec.egressGateway.enabled` (default `true`) toggles
-the `VpcEgressGateway` pod; setting it `false` scales the gateway to 0,
-cutting internet access, without stopping the VM itself. VM power state is
-managed separately (directly via KubeVirt).
+**Egress Gateway** — `spec.egressGateway.enabled` (default `true`) controls the `VpcEgressGateway` pod; `false` scales the gateway to 0, cutting internet access, without affecting VM power state. VM power is managed separately (via KubeVirt).
 
 <a id="ttl--expiry-model"></a>
-**TTL & expiry model** — clones are expected to be temporary. Three fields
-work together:
-- `spec.ttl` — how long after the resolved age anchor the clone's VMs become
-  eligible for deletion by a separate watchdog process. If unset, a
-  cluster-configured default applies (`CLONE_DEFAULT_TTL` env var, 720h/30d
-  built-in default). There is deliberately **no schema-level default** for
-  this field — a default baked into the schema would materialize onto every
-  clone at admission time and make the operator's env-configurable default
-  unreachable.
-- `spec.ageAnchor` — an explicit RFC3339 timestamp to use as the age anchor
-  instead of this clone's own creation time.
-- `spec.replacesCloneID` — names a prior clone (by its `status.cloneID`)
-  whose age this clone should inherit. This is the "refresh without
-  resetting the clock" pattern: if you tear down and recreate a clone (e.g.
-  to pick up a new template), setting `replacesCloneID` to the predecessor's
-  ID makes the new clone expire at the **same wall-clock time** the old one
-  would have — `status.expiresAt` is inherited verbatim from the
-  predecessor, not recomputed. Lookup by `replacesCloneID` takes priority
-  over `spec.ageAnchor` when the predecessor still exists.
+**TTL & Expiry Model** — clones are typically temporary. Three fields work together:
+- `spec.ttl` — after the resolved age anchor, the clone's VMs become eligible for deletion by a watchdog process. If unset, a default applies (`CLONE_DEFAULT_TTL` env var, 720h/30d built-in default). There is no schema-level default — a schema default would materialize on each clone at admission, making the operator's configurable default unreachable.
+- `spec.ageAnchor` — an RFC3339 timestamp to use instead of this clone's creation time.
+- `spec.replacesCloneID` — names a prior clone (by `status.cloneID`) whose age this clone inherits. This "refresh without resetting the clock" pattern lets a replacement clone expire at the same time as its predecessor — `status.expiresAt` is inherited, not recomputed. Lookup by `replacesCloneID` takes priority over `spec.ageAnchor` if the predecessor exists.
 
-Reaching `expiresAt` marks a clone's VMs as *eligible* for deletion — it
-doesn't delete them itself. A separate watchdog process acts on the
-`ruddervirt.io/expires-at` annotation it stamps onto each VM.
+Reaching `expiresAt` marks a clone's VMs as *eligible* for deletion — it doesn't perform deletion. A separate watchdog process uses the `ruddervirt.io/expires-at` annotation on each VM.
 
-### Example: clone with per-VM overrides
+### Example: Clone with Per-VM Overrides
 
 ```yaml
 apiVersion: ruddervirt.io/v1alpha1
@@ -722,7 +535,7 @@ spec:
   timeout: 15m
 ```
 
-### Example: TTL refresh via `replacesCloneID`
+### Example: TTL Refresh via `replacesCloneID`
 
 ```yaml
 apiVersion: ruddervirt.io/v1alpha1
@@ -731,12 +544,12 @@ metadata:
   name: web-base-lab-1-v2
   namespace: ruddervirt-system
 spec:
-  templateName: web-base   # rebuilt/updated template
+  templateName: web-base   # updated template
   replacesCloneID: "ns-abc123"   # status.cloneID of the clone this replaces
   timeout: 15m
 ```
 
-### Example: network topology override
+### Example: Network Topology Override
 
 ```yaml
 apiVersion: ruddervirt.io/v1alpha1
@@ -757,7 +570,7 @@ spec:
   timeout: 15m
 ```
 
-### Clone lifecycle & status
+### Clone Lifecycle & Status
 
 `status.phase`:
 
@@ -772,53 +585,34 @@ spec:
 | `Ready` | All VMs running |
 | `Failed` | See `status.message` |
 
-Per-volume `status.volumeStates[].phase` (`CloneVolumePhase`): `Pending` →
-`SnapshotSelected` → `SnapshotReady` → `PersistentVolumeReady` → `PVCBound`
-→ `Complete`.
+Per-volume `status.volumeStates[].phase` (`CloneVolumePhase`): `Pending` → `SnapshotSelected` → `SnapshotReady` → `PersistentVolumeReady` → `PVCBound` → `Complete`.
 
-Conditions: `TemplateValidated`, `SnapshotSelected`, `SnapshotsReady`,
-`VolumesReady`, `NetworkReady`, `VMProvisioned`, `Ready`,
-`AgeAnchorResolved`, `ExpiryResolved`.
+Conditions: `TemplateValidated`, `SnapshotSelected`, `SnapshotsReady`, `VolumesReady`, `NetworkReady`, `VMProvisioned`, `Ready`, `AgeAnchorResolved`, `ExpiryResolved`.
 
-`status.ageAnchor` and `status.expiresAt` are resolved once, in the `Pending`
-phase, and then held fixed — read them directly rather than recomputing TTL
-math from `spec.ttl` and `metadata.creationTimestamp`, since a
-`replacesCloneID` clone's `expiresAt` will not equal
-`creationTimestamp + ttl`.
+`status.ageAnchor` and `status.expiresAt` are resolved once in the `Pending` phase and then remain fixed — read them directly rather than recomputing TTL math from `spec.ttl` and `metadata.creationTimestamp`, as a `replacesCloneID` clone's `expiresAt` won't equal `creationTimestamp + ttl`.
 
-### Common gotchas
+### Common Gotchas
 
-- `vmOverrides[].name` must exactly match a VM name present in the template
-  namespace, or the override is inert.
-- `egressGateway.enabled: false` cuts internet access but does **not** stop
-  the VM — those are managed independently.
-- Omitting `spec.network` inherits the template's topology wholesale;
-  declaring any part of it replaces the topology for this clone, it does not
-  merge field-by-field.
+- `vmOverrides[].name` must match a VM name in the template namespace, or the override won't apply.
+- `egressGateway.enabled: false` stops internet access but not the VM itself.
+- Omitting `spec.network` uses the template's topology; declaring it changes the topology for this clone.
 
-### Troubleshooting pointers
+### Troubleshooting Pointers
 
-- `spec.timeout` defaults to `15m` for the whole clone operation.
-- A clone stuck in `Validating` almost always means `spec.templateName`
-  doesn't resolve to a `Succeeded` build's template namespace — check the
-  build's `status.phase` first.
+- `spec.timeout` defaults to `15m` for the whole clone process.
+- A clone stuck in `Validating` usually means `spec.templateName` doesn't resolve to a `Succeeded` build's template namespace — check the build's `status.phase` first.
 
-### See also
+### See Also
 
-[Modules](#modules-virtualmachinebuild) (what produces a clonable template) ·
-[Grading](#grading-graderequest) (what typically runs against a clone's VMs) ·
-[Shared concepts](#shared-concepts)
+[Modules](#modules-virtualmachinebuild) (what produces a clonable template) · [Grading](#grading-graderequest) (what typically runs against a clone's VMs) · [Shared concepts](#shared-concepts)
 
 ---
 
 ## Grading (`GradeRequest`)
 
-A `GradeRequest` runs a list of commands over a VM's **serial console**
-(not SSH) and records the raw result of each. There is **no scoring or
-rubric engine** — Aileron just returns `stdout`/`stderr`/`exitCode` per
-command; the caller decides what "pass" means.
+A `GradeRequest` runs commands over a VM's **serial console** (not SSH) and logs the raw result of each. There is **no scoring or rubric engine** — Aileron just returns `stdout`/`stderr`/`exitCode` per command; the caller determines what "pass" means.
 
-### Minimal example
+### Minimal Example
 
 ```yaml
 apiVersion: ruddervirt.io/v1alpha1
@@ -836,44 +630,21 @@ spec:
         - "systemctl is-active nginx"
 ```
 
-### Anatomy of a grade spec
+### Anatomy of a Grade Spec
 
-**`spec.namespace`** — the Kubernetes namespace containing the target VMs
-(typically a clone's `status.cloneNamespace`).
+**`spec.namespace`** — the Kubernetes namespace containing the target VMs (usually a clone's `status.cloneNamespace`).
 
-**`spec.vms[]`** — each entry is `name` (the full KubeVirt VM name),
-`commands[]` (run sequentially over the serial console), `user`/`password`
-(serial console login), and optional `domain` for domain-joined Windows
-guests authenticating via SAC.
+**`spec.vms[]`** — each entry includes `name` (full KubeVirt VM name), `commands[]` (run sequentially over the serial console), `user`/`password` (serial console login), and optional `domain` for domain-joined Windows guests using SAC.
 
-**OS auto-detection** — the grading method (serial-Windows vs. serial-Linux)
-is resolved by the controller from the target VM's `ruddervirt.io/os` label
-(see [Labels & annotations](#labels--annotations-reference)). **Callers never
-specify OS** — make sure the VM you're grading actually carries that label
-(every VM Aileron creates does).
+**OS Auto-Detection** — the grading method (serial-Windows vs. serial-Linux) is determined by the controller from the target VM's `ruddervirt.io/os` label (see [Labels & annotations](#labels--annotations-reference)). **Don't specify OS** — ensure the VM being graded has the correct label (all VMs created by Aileron do).
 
-**Legacy fields** — `spec.vmName`/`spec.commands`/`spec.user`/
-`spec.password`/`spec.domain` are still accepted for backward compatibility
-and are normalized into a one-element `vms[]` internally. Use `vms[]`
-directly for new integrations.
+**Legacy Fields** — `spec.vmName`/`spec.commands`/`spec.user`/ `spec.password`/`spec.domain` are accepted for backward compatibility and are converted into a single-element `vms[]`. Use `vms[]` directly for new integrations.
 
-**Auto power-on/off** — if a target VM is powered off, the controller powers
-it on automatically before grading (`status.vmStatuses[].autoStarted` /
-`bootStartedAt` record this) and waits `grading.bootWaitSeconds` (Helm value,
-default 240s) before running commands. Only VMs the controller itself
-started are powered back off afterward (`poweredOff`); VMs that were already
-running are left running.
+**Auto Power-On/Off** — if a target VM is off, the controller powers it on before grading (`status.vmStatuses[].autoStarted` / `bootStartedAt` record this) and waits `grading.bootWaitSeconds` (Helm value, default 240s) before running commands. Only VMs auto-started by the controller are powered off afterward (`poweredOff`); others stay running.
 
-**Concurrency queue** — grading is capped cluster-wide
-(`grading.maxConcurrent` Helm value, default 10; a slot covers both
-booting-for-grade and the running grade job). Each VM in `spec.vms[]` gets
-its **own grader Job** and competes independently for a free slot — VMs in
-the same `GradeRequest` are not batched or guaranteed to start together.
-`status.activeSlots`/`maxSlots`/`queuedCount` and per-VM
-`status.vmStatuses[].queuePosition` (1-based, cleared once admitted) are
-surfaced so a caller can render queue state without recomputing it.
+**Concurrency Queue** — grading is capped cluster-wide (`grading.maxConcurrent` Helm value, default 10; a slot covers booting-for-grade and the running grade job). Each VM in `spec.vms[]` gets its own grader Job and competes for a slot — VMs in the same `GradeRequest` aren't batched to start together. `status.activeSlots`/`maxSlots`/`queuedCount` and per-VM `status.vmStatuses[].queuePosition` (1-based, cleared once admitted) show queue state without recomputation.
 
-### Example: Windows, domain-joined
+### Example: Windows, Domain-Joined
 
 ```yaml
 apiVersion: ruddervirt.io/v1alpha1
@@ -893,7 +664,7 @@ spec:
         - "Get-CimInstance Win32_ComputerSystem | Select-Object PartOfDomain"
 ```
 
-### Example: multi-VM grading
+### Example: Multi-VM Grading
 
 ```yaml
 apiVersion: ruddervirt.io/v1alpha1
@@ -916,50 +687,34 @@ spec:
         - "curl -sf http://10.0.0.10 >/dev/null && echo reachable"
 ```
 
-### Grade lifecycle & status
+### Grade Lifecycle & Status
 
-`status.phase` (`GradeRequestPhase`): `Pending` → `Running` → `Ready` /
-`Failed`. Per-VM `status.vmStatuses[].phase` follows the same enum
-independently, since each VM's grading job runs on its own schedule.
+`status.phase` (`GradeRequestPhase`): `Pending` → `Running` → `Ready` / `Failed`. Per-VM `status.vmStatuses[].phase` follows the same pattern independently, as each VM's grading job runs on its own.
 
-`status.vmStatuses[].results[]` mirrors `spec.vms[].commands[]` positionally:
-each result has `stdout`, `stderr`, and `exitCode`. The established
-convention is to make each command **self-checking** — exit `0` for pass,
-non-zero for fail — since there's no separate scoring step to interpret
-output for you.
+`status.vmStatuses[].results[]` mirrors `spec.vms[].commands[]` positionally: each result has `stdout`, `stderr`, and `exitCode`. The convention is for each command to be **self-checking** — exit `0` for pass, non-zero for fail — since there's no separate scoring process.
 
-### Common gotchas
+### Common Gotchas
 
-- Commands are opaque to Aileron; there's no rubric or partial-credit engine.
-  Design each command to be self-checking.
-- `domain` only makes sense for domain-joined Windows guests using SAC; leave
-  it unset otherwise.
-- Never set an OS/grading-method field yourself — it doesn't exist in the
-  spec. Make sure the target VM's `ruddervirt.io/os` label is correct instead.
+- Commands are opaque to Aileron; there's no scoring engine. Each command should be self-checking.
+- `domain` is only relevant for domain-joined Windows guests using SAC; leave it unset otherwise.
+- Don't specify an OS/grading-method field — it doesn't exist in the spec. Ensure the target VM's `ruddervirt.io/os` label is correct.
 
-### Troubleshooting pointers
+### Troubleshooting Pointers
 
-- A VM stuck with a `queuePosition` set means it's waiting on a global
-  concurrency slot (`grading.maxConcurrent`) — check `status.activeSlots`
-  against `status.maxSlots` across the cluster, not just this request.
-- If `status.vmStatuses[].phase` is `Failed` with no `results[]`, check
-  `status.vmStatuses[].message` — this usually means the serial console
-  login itself failed (wrong `user`/`password`, or the VM never finished
-  booting within the boot-wait grace period), not that a command failed.
+- A VM stuck with a `queuePosition` means it's waiting for a global concurrency slot (`grading.maxConcurrent`) — check `status.activeSlots` against `status.maxSlots` cluster-wide, not just this request.
+- If `status.vmStatuses[].phase` is `Failed` without `results[]`, check `status.vmStatuses[].message` — this usually indicates a login failure (wrong `user`/`password`, or the VM didn't boot within the grace period), not a command failure.
 
-### See also
+### See Also
 
-[Clones](#clones-virtualmachineclone) (what you typically grade) ·
-[Shared concepts](#shared-concepts) · [End-to-end walkthrough](#end-to-end-walkthrough)
+[Clones](#clones-virtualmachineclone) (what you typically grade) · [Shared concepts](#shared-concepts) · [End-to-end walkthrough](#end-to-end-walkthrough)
 
 ---
 
-## End-to-end walkthrough
+## End-to-End Walkthrough
 
-A typical integration chains all three resources: build once, clone many
-times, grade each clone.
+A typical integration uses all three resources: build once, clone multiple times, grade each clone.
 
-**1. Build a template once.**
+**1. Build a Template Once.**
 
 ```yaml
 apiVersion: ruddervirt.io/v1alpha1
@@ -990,12 +745,9 @@ spec:
   timeout: 30m
 ```
 
-Watch `status.phase` until it reaches `Succeeded`. The build's `metadata.name`
-(`web-base`) is now usable as a clone's `templateName` — no need to read
-`status.buildID` for this step, since `templateName` resolves by the build's
-*name*, not its generated ID.
+Watch `status.phase` until `Succeeded`. The build's `metadata.name` (`web-base`) is now usable as a clone's `templateName` — no need to read `status.buildID` for this step, since `templateName` resolves by the build's *name*, not its generated ID.
 
-**2. Clone it for a lab instance.**
+**2. Clone It for a Lab Instance.**
 
 ```yaml
 apiVersion: ruddervirt.io/v1alpha1
@@ -1009,12 +761,9 @@ spec:
   timeout: 15m
 ```
 
-Watch `status.phase` until it reaches `Ready`, then read
-`status.cloneNamespace` and `status.vmStatuses[].name` — the VM name here
-(`web`, matching the build's VM name unless overridden) is what a grade
-request targets next.
+Watch `status.phase` until `Ready`, then read `status.cloneNamespace` and `status.vmStatuses[].name` — the VM name here (`web`, matching the build's VM name unless overridden) is what a grade request targets next.
 
-**3. Grade the running clone.**
+**3. Grade the Running Clone.**
 
 ```yaml
 apiVersion: ruddervirt.io/v1alpha1
@@ -1032,12 +781,7 @@ spec:
         - "systemctl is-active nginx"
 ```
 
-Watch `status.phase` until `Ready`, then read
-`status.vmStatuses[0].results[0].exitCode` — `0` means nginx was active.
+Watch `status.phase` until `Ready`, then read `status.vmStatuses[0].results[0].exitCode` — `0` means nginx was active.
 
-When the clone's `ttl` (4h here) elapses from creation, the watchdog becomes
-eligible to delete `web`. To refresh the lab without resetting that clock —
-e.g. rolling forward to a newer `web-base` build without extending how long
-the student's total session can run — create a new clone with
-`replacesCloneID` set to the old clone's `status.cloneID`.
-
+When the clone's `ttl` (4h here) elapses from creation, the watchdog becomes eligible to delete `web`. To refresh the lab without resetting that clock — e.g., rolling forward to a newer `web-base` build without extending the session — create a new clone with `replacesCloneID` set to the old clone's `status.cloneID`.
+```
