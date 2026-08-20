@@ -1411,6 +1411,15 @@ func (h *buildingHandler) Handle(ctx context.Context, vmBuild *v1alpha1.VirtualM
 	for i := range vmBuild.Spec.VMs {
 		if vmBuild.Spec.VMs[i].EFIFirmware != nil {
 			if err := build.EnsureEFIFirmware(ctx, h.client, vmBuild, &vmBuild.Spec.VMs[i]); err != nil {
+				// A missing buildRef parent (deleted, or a stale/wrong
+				// reference) can never resolve by retrying — fail fast
+				// instead of spinning until Spec.Timeout, which buries the
+				// real cause behind a generic timeout message. Every other
+				// EnsureEFIFirmware error is a normal transient "not
+				// created yet" state, so it keeps retrying as before.
+				if errors.IsNotFound(err) {
+					return v1alpha1.BuildPhaseFailed, fmt.Errorf("ensuring EFI firmware for VM %s: %w", vmBuild.Spec.VMs[i].Name, err)
+				}
 				return v1alpha1.BuildPhaseBuilding, fmt.Errorf("ensuring EFI firmware for VM %s: %w", vmBuild.Spec.VMs[i].Name, err)
 			}
 		}

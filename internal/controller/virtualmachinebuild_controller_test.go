@@ -576,3 +576,75 @@ var _ = Describe("normalizeBuildRefDisks", func() {
 		})
 	})
 })
+
+// buildWithEFIBuildRef returns a single-VM VirtualMachineBuild whose VM
+// requests custom EFI firmware cloned from the given buildRef parent name.
+// Matches the exam-its-n4orsrog-tmf2c shape: EFIFirmware + Source.BuildRef.
+func buildWithEFIBuildRef(buildID, parentName string) *aileroniov1alpha1.VirtualMachineBuild {
+	return &aileroniov1alpha1.VirtualMachineBuild{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default"},
+		Status:     aileroniov1alpha1.VirtualMachineBuildStatus{BuildID: buildID},
+		Spec: aileroniov1alpha1.VirtualMachineBuildSpec{
+			VMs: []aileroniov1alpha1.BuildVM{{
+				Name:        "vm0",
+				EFIFirmware: &aileroniov1alpha1.EFIFirmware{},
+				Source: aileroniov1alpha1.BuildSource{
+					BuildRef: &aileroniov1alpha1.BuildReference{Name: parentName},
+				},
+			}},
+		},
+	}
+}
+
+var _ = Describe("buildingHandler EFI firmware buildRef validation", func() {
+	ctx := context.Background()
+	var h *buildingHandler
+
+	BeforeEach(func() {
+		h = &buildingHandler{client: k8sClient}
+	})
+
+	It("fails the build fast when the EFI firmware buildRef parent doesn't exist", func() {
+		// Matches exam-its-n4orsrog-tmf2c on rudderusa: source.buildRef named
+		// a VirtualMachineBuild that had been deleted (or never existed), so
+		// EnsureEFIFirmware's parent lookup returns NotFound. That can never
+		// resolve by retrying, so this must fail immediately instead of
+		// spinning until Spec.Timeout.
+		child := buildWithEFIBuildRef("efi-missing-parent-child", "does-not-exist")
+
+		phase, err := h.Handle(ctx, child)
+
+		Expect(phase).To(Equal(aileroniov1alpha1.BuildPhaseFailed))
+		Expect(err).To(MatchError(ContainSubstring("does-not-exist")))
+		Expect(err).To(MatchError(ContainSubstring("not found")))
+	})
+
+	It("keeps retrying, not failing, when the buildRef parent exists", func() {
+		parent := &aileroniov1alpha1.VirtualMachineBuild{
+			ObjectMeta: metav1.ObjectMeta{GenerateName: "efi-real-parent-", Namespace: "default"},
+			Spec: aileroniov1alpha1.VirtualMachineBuildSpec{
+				VMs: []aileroniov1alpha1.BuildVM{{
+					Name:   "parentvm",
+					Source: aileroniov1alpha1.BuildSource{Blank: true},
+				}},
+			},
+		}
+		Expect(k8sClient.Create(ctx, parent)).To(Succeed())
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, parent)).To(Succeed()) })
+
+		parent.Status.BuildID = "efi-real-parent"
+		parent.Status.VMStatuses = []aileroniov1alpha1.VMBuildStatus{{Name: "parentvm"}}
+		Expect(k8sClient.Status().Update(ctx, parent)).To(Succeed())
+
+		child := buildWithEFIBuildRef("efi-real-parent-child", parent.Name)
+
+		phase, err := h.Handle(ctx, child)
+
+		// The parent has no EFI PVC yet (its own build never actually ran),
+		// so the copy still can't complete — but that's a transient "not
+		// created yet" state, not a permanent missing reference, so this
+		// must not be reported as Failed.
+		Expect(err).NotTo(HaveOccurred())
+		Expect(phase).NotTo(Equal(aileroniov1alpha1.BuildPhaseFailed))
+	})
+})
