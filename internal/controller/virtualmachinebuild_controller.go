@@ -1496,8 +1496,11 @@ func (h *buildingHandler) Handle(ctx context.Context, vmBuild *v1alpha1.VirtualM
 			if err == nil && nextPhase == v1alpha1.VMPhaseBooting && len(vmSpec.ISOs) > 0 {
 				allISOsReady, isoErr := isoImporter.HandleISOs(ctx, vmBuild, vmSpec)
 				if isoErr != nil {
+					// isoErr already fully describes the failure (which
+					// ISO, which URL) — wrapping it again here would just
+					// repeat that context.
 					nextPhase = v1alpha1.VMPhaseFailed
-					err = fmt.Errorf("ISO import: %w", isoErr)
+					err = isoErr
 				} else if !allISOsReady {
 					nextPhase = v1alpha1.VMPhaseSourceImporting
 				}

@@ -2,9 +2,11 @@ package build
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
+	v1alpha1 "github.com/ruddervirt/aileron/api/v1alpha1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -130,5 +132,120 @@ func TestCleanupExpiredISOsSkipsClones(t *testing.T) {
 	got.SetGroupVersionKind(dvGVK)
 	if err := cl.Get(context.Background(), types.NamespacedName{Name: "iso-clone", Namespace: "op-ns"}, got); err != nil {
 		t.Errorf("clone DV should have been kept, got err: %v", err)
+	}
+}
+
+// withRunningTransition sets the Running condition's lastTransitionTime
+// on dv, for cacheImportError grace-period tests. dv must already carry a
+// Running condition (cacheDV with a non-nil runningCond).
+func withRunningTransition(dv *unstructured.Unstructured, transitioned time.Time) *unstructured.Unstructured {
+	conditions := dv.Object["status"].(map[string]any)["conditions"].([]any)
+	for _, item := range conditions {
+		cond := item.(map[string]any)
+		if cond["type"] == "Running" {
+			cond["lastTransitionTime"] = transitioned.UTC().Format(time.RFC3339)
+		}
+	}
+	return dv
+}
+
+func TestCacheImportError(t *testing.T) {
+	old := time.Now().Add(-1 * time.Hour)
+	fresh := time.Now()
+
+	cases := []struct {
+		name    string
+		dv      *unstructured.Unstructured
+		wantErr bool
+	}{
+		{
+			name:    "stalled and past grace period → error",
+			dv:      withRunningTransition(cacheDV("iso-a", old, "ImportInProgress", []string{"False", "Error"}), old),
+			wantErr: true,
+		},
+		{
+			name:    "stalled but within grace period → nil",
+			dv:      withRunningTransition(cacheDV("iso-b", fresh, "ImportInProgress", []string{"False", "Error"}), fresh),
+			wantErr: false,
+		},
+		{
+			name:    "actively downloading, old → nil",
+			dv:      withRunningTransition(cacheDV("iso-c", old, "ImportInProgress", []string{"True", "Pod is running"}), old),
+			wantErr: false,
+		},
+		{
+			name:    "non-terminal, no error condition, old → nil",
+			dv:      withRunningTransition(cacheDV("iso-d", old, "ImportScheduled", []string{"False", "Pending"}), old),
+			wantErr: false,
+		},
+		{
+			// The exact scenario cacheImportError's anchor is designed for:
+			// a long-running, otherwise-healthy import (DV itself is old)
+			// that just had its Running condition flip to Error a moment
+			// ago — a transient blip, not proof of a permanently dead
+			// source. No creation timestamp is set on this DV at all,
+			// proving the result depends only on the condition's own
+			// transition time, never on the DataVolume's age.
+			name:    "Running just transitioned to Error, DV otherwise old → nil (fresh blip, not yet stalled)",
+			dv:      withRunningTransition(cacheDV("iso-e", time.Now(), "ImportInProgress", []string{"False", "Error"}), fresh),
+			wantErr: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := cacheImportError(tc.dv)
+			if (err != nil) != tc.wantErr {
+				t.Errorf("cacheImportError() = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestISOImporter_EnsureCacheDV_FailsFastOnStalledImport reproduces
+// base-kali-a5tcqtnf-7vzzr on rudderusa: an ISO cache DataVolume whose
+// source URL 404s. CDI never sets status.phase to Failed for this — it
+// crashloops the importer pod forever — so before this fix the build
+// polled "still importing" until Spec.Timeout (2h). It must now fail fast
+// with the real CDI error once the grace period has elapsed.
+func TestISOImporter_EnsureCacheDV_FailsFastOnStalledImport(t *testing.T) {
+	old := time.Now().Add(-10 * time.Minute)
+	dv := withRunningTransition(cacheDV("aileron-iso-deadurl", old, "ImportInProgress",
+		[]string{"False", "Error"}), old)
+	// Match the real message observed on the cluster.
+	dv.Object["status"].(map[string]any)["conditions"].([]any)[1].(map[string]any)["message"] =
+		"Unable to connect to http data source: expected status code 200, got 404. Status: 404 Not Found"
+
+	cl := fake.NewClientBuilder().WithScheme(isoScheme(t)).WithObjects(dv).Build()
+	iso := &ISOImporter{Client: cl, OperatorNS: "op-ns"}
+
+	_, err := iso.ensureCacheDV(context.Background(), "op-ns", "aileron-iso-deadurl",
+		&v1alpha1.ISOSource{URL: "https://cdimage.kali.org/kali-2025.3/kali-linux-2025.3-installer-netinst-amd64.iso"},
+		"deadurl-cache-key")
+	if err == nil {
+		t.Fatal("ensureCacheDV: want error for a stalled import past the grace period, got nil")
+	}
+	if !strings.Contains(err.Error(), "404") {
+		t.Errorf("ensureCacheDV error = %q, want it to include the underlying 404", err.Error())
+	}
+}
+
+// TestISOImporter_EnsureCacheDV_StillWaitingWithinGracePeriod guards the
+// grace period itself: a freshly-created cache DV that's already stalled
+// must not fail immediately — CDI gets a chance to retry first.
+func TestISOImporter_EnsureCacheDV_StillWaitingWithinGracePeriod(t *testing.T) {
+	fresh := time.Now()
+	dv := withRunningTransition(cacheDV("aileron-iso-fresh", fresh, "ImportInProgress",
+		[]string{"False", "Error"}), fresh)
+
+	cl := fake.NewClientBuilder().WithScheme(isoScheme(t)).WithObjects(dv).Build()
+	iso := &ISOImporter{Client: cl, OperatorNS: "op-ns"}
+
+	ready, err := iso.ensureCacheDV(context.Background(), "op-ns", "aileron-iso-fresh",
+		&v1alpha1.ISOSource{URL: "https://example.test/some.iso"}, "fresh-cache-key")
+	if err != nil {
+		t.Fatalf("ensureCacheDV: want nil error within the grace period, got %v", err)
+	}
+	if ready {
+		t.Error("ensureCacheDV: ready = true, want false (still importing)")
 	}
 }

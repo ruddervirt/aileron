@@ -164,6 +164,21 @@ func (s *SourceImporter) HandleVM(ctx context.Context, build *v1alpha1.VirtualMa
 	return v1alpha1.VMPhaseSourceImporting, nil
 }
 
+// sourceCacheRef returns a human-identifiable reference for a resolved
+// cacheable source, for use in error messages — the DataVolume's own
+// generated name (e.g. aileron-src-a1b2c3d4e5f6) means nothing to someone
+// reading a build failure, but the URL or container image does.
+func sourceCacheRef(src *resolvedSource, name string) string {
+	switch {
+	case src.url != "":
+		return src.url
+	case src.containerDisk != "":
+		return src.containerDisk
+	default:
+		return name
+	}
+}
+
 // ensureCacheDV ensures a cached source DataVolume exists in the operator namespace.
 // Returns true when the cache DV is ready (Succeeded).
 func (s *SourceImporter) ensureCacheDV(ctx context.Context, vmSpec *v1alpha1.BuildVM, src *resolvedSource, name, namespace string) (bool, error) {
@@ -186,8 +201,11 @@ func (s *SourceImporter) ensureCacheDV(ctx context.Context, vmSpec *v1alpha1.Bui
 			_ = s.Client.Update(ctx, existing) // best-effort
 			return true, nil
 		case PhaseFailed:
-			return false, fmt.Errorf("cached source import failed for %s", name)
+			return false, fmt.Errorf("cached source import failed for %s", sourceCacheRef(src, name))
 		default:
+			if stuckErr := cacheImportError(existing); stuckErr != nil {
+				return false, fmt.Errorf("cached source import for %s: %w", sourceCacheRef(src, name), stuckErr)
+			}
 			return false, nil // still importing
 		}
 	}

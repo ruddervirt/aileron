@@ -52,7 +52,11 @@ func (iso *ISOImporter) HandleISOs(ctx context.Context, build *v1alpha1.VirtualM
 		// Phase 1: Ensure the ISO is cached in the operator namespace.
 		cacheReady, err := iso.ensureCacheDV(ctx, cacheNS, cacheName, isoSpec, cacheKey)
 		if err != nil {
-			return false, fmt.Errorf("ensuring ISO cache for %s: %w", isoSpec.URL, err)
+			// ensureCacheDV's own errors already name the URL, so wrap with
+			// the ISO's position instead of repeating it — useful context
+			// on a VM with multiple ISOs, not a duplicate of what's already
+			// in err.
+			return false, fmt.Errorf("ISO %d: %w", i, err)
 		}
 		if !cacheReady {
 			logger.Info("Waiting for ISO cache download", "iso", cacheName, "namespace", cacheNS)
@@ -164,6 +168,9 @@ func (iso *ISOImporter) ensureCacheDV(ctx context.Context, namespace, name strin
 		case PhaseFailed:
 			return false, fmt.Errorf("ISO import failed for %s", isoSpec.URL)
 		default:
+			if stuckErr := cacheImportError(existing); stuckErr != nil {
+				return false, fmt.Errorf("ISO import for %s: %w", isoSpec.URL, stuckErr)
+			}
 			return false, nil // still importing
 		}
 	}
@@ -278,6 +285,10 @@ func (iso *ISOImporter) CleanupExpiredISOs(ctx context.Context, namespace string
 	return nil
 }
 
+// conditionStatusFalse is the Kubernetes condition status.status value
+// meaning the condition does not hold.
+const conditionStatusFalse = "False"
+
 // importStalled reports whether a DataVolume's import has stopped making
 // progress: its Running condition is False with reason Error (the condition
 // CDI sets while it retries a failing importer indefinitely).
@@ -285,10 +296,56 @@ func importStalled(dv *unstructured.Unstructured) bool {
 	conditions, _, _ := unstructured.NestedSlice(dv.Object, "status", "conditions")
 	for _, item := range conditions {
 		cond, ok := item.(map[string]any)
-		if !ok || cond["type"] != "Running" {
+		if !ok || cond["type"] != PhaseRunning {
 			continue
 		}
-		return cond["status"] == "False" && cond["reason"] == "Error"
+		return cond["status"] == conditionStatusFalse && cond["reason"] == "Error"
 	}
 	return false
+}
+
+// importStalledGracePeriod bounds how long a cache DataVolume's Running
+// condition may report False/reason=Error (see importStalled) before
+// aileron treats the import as permanently failed rather than possibly
+// still retrying. CDI never transitions status.phase to Failed for this
+// case — it crashloops the importer pod forever — so without this, a
+// build waiting on the cache would poll "still importing" until
+// Spec.Timeout. Measured from the condition's own lastTransitionTime, not
+// the DataVolume's age: a long-running, otherwise-healthy import can
+// briefly flip Running to False/Error on a transient blip and recover on
+// CDI's next retry, and that blip deserves its own fresh grace window
+// regardless of how old the DataVolume already is.
+const importStalledGracePeriod = 3 * time.Minute
+
+// cacheImportError returns a non-nil error once a cache DataVolume's
+// Running condition has reported False/reason=Error (see importStalled)
+// for at least importStalledGracePeriod, describing the underlying CDI
+// error. Returns nil while the condition is healthy, absent, or has been
+// in the error state for less than the grace period.
+func cacheImportError(dv *unstructured.Unstructured) error {
+	conditions, _, _ := unstructured.NestedSlice(dv.Object, "status", "conditions")
+	for _, item := range conditions {
+		cond, ok := item.(map[string]any)
+		if !ok || cond["type"] != PhaseRunning {
+			continue
+		}
+		if cond["status"] != conditionStatusFalse || cond["reason"] != "Error" {
+			return nil
+		}
+		since := time.Now()
+		if raw, found, _ := unstructured.NestedString(cond, "lastTransitionTime"); found {
+			if t, err := time.Parse(time.RFC3339, raw); err == nil {
+				since = t
+			}
+		}
+		if time.Since(since) < importStalledGracePeriod {
+			return nil
+		}
+		msg, _, _ := unstructured.NestedString(cond, "message")
+		if msg == "" {
+			return fmt.Errorf("import stalled")
+		}
+		return fmt.Errorf("import stalled: %s", msg)
+	}
+	return nil
 }
