@@ -30,15 +30,44 @@ func GetVMIPFromVMI(ctx context.Context, k8sClient client.Client, vmiName, names
 			continue
 		}
 		name, _, _ := unstructured.NestedString(ifaceMap, "name")
-		if name == nicName {
-			ip, _, _ := unstructured.NestedString(ifaceMap, "ipAddress")
-			if ip != "" {
-				return ip, nil
+		if name != nicName {
+			continue
+		}
+		addrs, _, _ := unstructured.NestedStringSlice(ifaceMap, "ipAddresses")
+		if len(addrs) == 0 {
+			if ip, _, _ := unstructured.NestedString(ifaceMap, "ipAddress"); ip != "" {
+				addrs = []string{ip}
 			}
+		}
+		if ip := firstUsableIP(addrs); ip != "" {
+			return ip, nil
 		}
 	}
 
-	return "", fmt.Errorf("VMI %s has no IP for interface %s", vmiName, nicName)
+	return "", fmt.Errorf("VMI %s has no usable IP for interface %s", vmiName, nicName)
+}
+
+// firstUsableIP returns the first IPv4 address in addrs, or if none, the
+// first non-link-local address of any family. A NIC's IPv6 link-local
+// address (fe80::/10) is present the instant the interface comes up —
+// before DHCP has re-acquired an IPv4 lease — and is never reachable
+// through the relay pod's exec-based TCP tunnel, so it must never be
+// selected as "the" VM's IP even when it's the only address reported yet.
+func firstUsableIP(addrs []string) string {
+	var fallback string
+	for _, a := range addrs {
+		ip := net.ParseIP(a)
+		if ip == nil || ip.IsLinkLocalUnicast() {
+			continue
+		}
+		if ip.To4() != nil {
+			return a
+		}
+		if fallback == "" {
+			fallback = a
+		}
+	}
+	return fallback
 }
 
 // NewRelayDialFunc returns a Dial function that tunnels TCP through a relay pod
