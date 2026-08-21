@@ -1,4 +1,3 @@
-```markdown
 # Aileron End-User Documentation
 
 This guide covers the creation of resources with Aileron, checking their status, and understanding their connections using labels and naming conventions. It's meant for users writing YAML programmatically, such as fleet-management controllers, UI backends, or operators.
@@ -466,7 +465,6 @@ On success, `status.templateNamespace` (equal to `status.buildNamespace`) is wha
 - Pin `nics[].slot` for any interface whose in-guest identity must survive a layered build or clone.
 - `source.buildRef` requires the parent build to be `Succeeded` — it fails immediately otherwise.
 - `cloudInit` is attached only if the field is present; an empty `{}` works, but omit it entirely to skip the cloud-init disk.
-- **A provisioner joining a Windows VM to a domain breaks the SSH communicator for later steps**, unless `communicator.sshUsername` is qualified. After `Add-Computer`, Windows resolves a bare username (e.g., `skills`) against AD instead of the local database, causing failures with a generic "unknown username or bad password," even though the account and password are unchanged. Qualify the username as `.\<username>` for local machine resolution, ensuring continuity before and after the join.
 
 ### Troubleshooting Pointers
 
@@ -784,4 +782,3 @@ spec:
 Watch `status.phase` until `Ready`, then read `status.vmStatuses[0].results[0].exitCode` — `0` means nginx was active.
 
 When the clone's `ttl` (4h here) elapses from creation, the watchdog becomes eligible to delete `web`. To refresh the lab without resetting that clock — e.g., rolling forward to a newer `web-base` build without extending the session — create a new clone with `replacesCloneID` set to the old clone's `status.cloneID`.
-```
