@@ -61,13 +61,13 @@ USER 65532:65532
 ENTRYPOINT ["/coordinator"]
 
 # Egress bridge helper (replaces nicolaka/netshoot)
-FROM alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d AS egress-bridge
+FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS egress-bridge
 LABEL org.opencontainers.image.source="https://github.com/ruddervirt/aileron"
 RUN apk add --no-cache iproute2 iptables
 ENTRYPOINT ["/bin/sh"]
 
 # Build helper (disk image creation, etc.)
-FROM alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d AS helper
+FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS helper
 LABEL org.opencontainers.image.source="https://github.com/ruddervirt/aileron"
 RUN apk add --no-cache mtools dosfstools cdrkit
 ENTRYPOINT ["/bin/sh"]
