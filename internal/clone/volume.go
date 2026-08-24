@@ -73,11 +73,17 @@ func templateVMShortName(vm *unstructured.Unstructured) string {
 // transfer is needed. owner is the clone's VirtualMachineNamespace CR, set as the
 // PVC's controller owner so deleting the clone root garbage-collects its storage.
 //
+// When expiresAt is non-nil, it is stamped as the ruddervirt.io/expires-at
+// annotation — the same value stamped onto the clone's VMs (see EnsureVMs) — so
+// that if this PVC is ever orphaned by a clone deletion that bypasses normal
+// teardown (e.g. a force-delete that skips the finalizer sweep), pvc_reaper.go
+// has a trustworthy, PVC-local signal for whether it is safe to reclaim.
+//
 // The snapshot data source is validated before the PVC is created and re-checked
 // while the PVC stays Pending: a missing or terminating snapshot (or a PVC that
 // cannot provision) returns ErrSnapshotUnusable so the clone fails fast instead of
 // emitting a perpetually-Pending PVC.
-func (v *VolumeManager) EnsureClonePVC(ctx context.Context, cloneID string, state *v1alpha1.CloneVolumeStatus, cloneNamespace string, owner *v1alpha1.VirtualMachineNamespace) (bool, error) {
+func (v *VolumeManager) EnsureClonePVC(ctx context.Context, cloneID string, state *v1alpha1.CloneVolumeStatus, cloneNamespace string, owner *v1alpha1.VirtualMachineNamespace, expiresAt *metav1.Time) (bool, error) {
 	logger := log.FromContext(ctx)
 
 	if state.PersistentVolumeClaimName == "" {
@@ -149,6 +155,9 @@ func (v *VolumeManager) EnsureClonePVC(ctx context.Context, cloneID string, stat
 	}
 	if state.StorageClassName != "" {
 		pvc.Spec.StorageClassName = &state.StorageClassName
+	}
+	if expiresAt != nil {
+		pvc.Annotations[v1alpha1.AnnotationExpiresAt] = expiresAt.UTC().Format(time.RFC3339)
 	}
 	// Own the PVC by the clone's VirtualMachineNamespace CR (same namespace as the
 	// PVC), so k8s garbage-collects it with the clone root. A reference to the

@@ -296,7 +296,7 @@ func (r *VirtualMachineCloneReconciler) handleVolumeProvisioning(ctx context.Con
 			continue
 		}
 
-		ready, err := r.volumeManager.EnsureClonePVC(ctx, cloneID, state, cloneNS, owner)
+		ready, err := r.volumeManager.EnsureClonePVC(ctx, cloneID, state, cloneNS, owner, vmClone.Status.ExpiresAt)
 		if err != nil {
 			// A dead/terminating snapshot or a PVC that cannot provision is terminal:
 			// fail the clone fast with a clear condition instead of retrying forever.

@@ -14,9 +14,11 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 const (
@@ -386,6 +388,67 @@ func ensureEFIPVC(ctx context.Context, c client.Client, build *v1alpha1.VirtualM
 		return err
 	}
 	return nil
+}
+
+// ownEFIPVCByVM sets vm as the efivars PVC's controller owner, once vm is known to
+// exist. ensureEFIPVC cannot set this at creation time — the EFI PVC is provisioned
+// before the build VM necessarily exists — so this closes the gap once the VM is
+// available: with vm as the real k8s owner, any VM deletion (an external watchdog, a
+// bare "kubectl delete vm", or aileron's own cleanup) cascades the PVC automatically,
+// the same way KubeVirt already owns the VM's persistent-state PVC. Previously the
+// efivars PVC had no owner at all and was reaped only when the parent
+// VirtualMachineBuild CR itself was deleted through the normal reconcile path — never
+// when the VM alone was removed. Idempotent: a PVC already owned by this exact VM
+// (matched by UID) is left untouched; a stale VirtualMachine ownerRef pointing at a
+// prior, since-deleted VM (e.g. VMBooter recreating a drifted VM gets a new UID) is
+// replaced rather than left to accumulate — a PVC with two controller:true
+// ownerReferences is rejected by the API server. A PVC that does not exist (not yet
+// created, or already gone) is a no-op.
+func ownEFIPVCByVM(ctx context.Context, c client.Client, ns, pvcName string, vm *unstructured.Unstructured) error {
+	pvc := &corev1.PersistentVolumeClaim{}
+	if err := c.Get(ctx, types.NamespacedName{Name: pvcName, Namespace: ns}, pvc); err != nil {
+		if errors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+
+	refs := pvc.OwnerReferences
+	for i, ref := range refs {
+		if ref.Kind != "VirtualMachine" {
+			continue
+		}
+		if ref.UID == vm.GetUID() {
+			return nil
+		}
+		// Stale reference to a since-replaced VM (different UID) — replace in place.
+		refs = append(refs[:i:i], refs[i+1:]...)
+		break
+	}
+
+	pvc.OwnerReferences = append(refs, metav1.OwnerReference{
+		APIVersion:         "kubevirt.io/v1",
+		Kind:               "VirtualMachine",
+		Name:               vm.GetName(),
+		UID:                vm.GetUID(),
+		Controller:         new(true),
+		BlockOwnerDeletion: new(true),
+	})
+	return c.Update(ctx, pvc)
+}
+
+// ownEFIPVCByVMBestEffort calls ownEFIPVCByVM and logs (rather than propagates) any
+// failure. Ownership-patching is a resilience measure, not core build functionality —
+// a transient failure here (429 throttling, a brief apiserver blip) must never fail
+// the VM's phase or the whole build over a missed metadata patch. Callers invoke this
+// on every reconcile while the VM exists, so a later successful call still catches up;
+// worst case on a persistent failure is the pre-existing behavior (an unowned PVC),
+// never a new one.
+func ownEFIPVCByVMBestEffort(ctx context.Context, c client.Client, ns, pvcName string, vm *unstructured.Unstructured) {
+	if err := ownEFIPVCByVM(ctx, c, ns, pvcName, vm); err != nil {
+		log.FromContext(ctx).Error(err, "owning efivars PVC by VM (best-effort, will retry next reconcile)",
+			"pvc", pvcName, "vm", vm.GetName())
+	}
 }
 
 func ensureEFICopyJob(ctx context.Context, c client.Client, build *v1alpha1.VirtualMachineBuild, vmSpec *v1alpha1.BuildVM) error {

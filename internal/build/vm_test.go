@@ -2,16 +2,21 @@ package build
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	v1alpha1 "github.com/ruddervirt/aileron/api/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 func TestCPUCores(t *testing.T) {
@@ -199,5 +204,95 @@ func TestCheckVMI_SynchronizedFalseBeyondGracePeriod_Fails(t *testing.T) {
 	}
 	if msg != "VMI Synchronized=False: PVC pending" {
 		t.Errorf("msg = %q", msg)
+	}
+}
+
+// TestHandleVM_OwnsEFIVarsPVCOnExistingVM confirms HandleVM patches the efivars PVC's
+// ownerReference to the build VM as soon as the VM is found to already exist —
+// covering the majority of a build's lifetime (Booting/Provisioning/CapturingDisks),
+// not just the final TemplateProvisioning phase. Before this, a VM deleted anywhere in
+// that window left its efivars PVC unowned and orphaned forever.
+func TestHandleVM_OwnsEFIVarsPVCOnExistingVM(t *testing.T) {
+	build := &v1alpha1.VirtualMachineBuild{
+		ObjectMeta: metav1.ObjectMeta{Name: "bld", Namespace: "vm-bld"},
+		Status:     v1alpha1.VirtualMachineBuildStatus{BuildID: "bld"},
+	}
+	vmSpec := &v1alpha1.BuildVM{Name: "webserver", EFIFirmware: &v1alpha1.EFIFirmware{}}
+	vmStatus := &v1alpha1.VMBuildStatus{}
+
+	vmName := BuildNameForBuildVM(BuildID(build), vmSpec.Name)
+	vm := &unstructured.Unstructured{}
+	vm.SetGroupVersionKind(vmGVK)
+	vm.SetName(vmName)
+	vm.SetNamespace("vm-bld")
+	vm.SetUID(testVMUID)
+
+	pvcName := efiPVCName(BuildID(build), vmSpec.Name)
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: pvcName, Namespace: "vm-bld",
+			// Pre-marked populated so IsEFIFirmwareReady short-circuits true without
+			// needing a completed copy Job in this test's fixtures.
+			Annotations: map[string]string{"aileron.ruddervirt.io/efi-populated": valueTrue},
+		},
+	}
+
+	cl := fake.NewClientBuilder().WithScheme(vmiScheme(t)).WithObjects(vm, pvc).Build()
+	v := &VMBooter{Client: cl}
+
+	if _, err := v.HandleVM(context.Background(), build, vmSpec, vmStatus); err != nil {
+		t.Fatalf("HandleVM: %v", err)
+	}
+
+	got := &corev1.PersistentVolumeClaim{}
+	if err := cl.Get(context.Background(), types.NamespacedName{Name: pvcName, Namespace: "vm-bld"}, got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.OwnerReferences) != 1 || got.OwnerReferences[0].UID != testVMUID {
+		t.Errorf("efivars PVC ownerReferences = %v, want owned by VM vm-uid-1", got.OwnerReferences)
+	}
+}
+
+// TestHandleVM_EFIOwnershipFailureDoesNotFailVM confirms a transient failure patching
+// the efivars PVC's ownership never fails the VM's phase — it's a resilience measure,
+// not core booting logic, and turning it into a hard failure would make a build
+// permanently fail over a missed metadata patch instead of retrying next reconcile.
+func TestHandleVM_EFIOwnershipFailureDoesNotFailVM(t *testing.T) {
+	build := &v1alpha1.VirtualMachineBuild{
+		ObjectMeta: metav1.ObjectMeta{Name: "bld", Namespace: "vm-bld"},
+		Status:     v1alpha1.VirtualMachineBuildStatus{BuildID: "bld"},
+	}
+	vmSpec := &v1alpha1.BuildVM{Name: "webserver", EFIFirmware: &v1alpha1.EFIFirmware{}}
+	vmStatus := &v1alpha1.VMBuildStatus{}
+
+	vmName := BuildNameForBuildVM(BuildID(build), vmSpec.Name)
+	vm := &unstructured.Unstructured{}
+	vm.SetGroupVersionKind(vmGVK)
+	vm.SetName(vmName)
+	vm.SetNamespace("vm-bld")
+	vm.SetUID(testVMUID)
+
+	pvcName := efiPVCName(BuildID(build), vmSpec.Name)
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: pvcName, Namespace: "vm-bld",
+			Annotations: map[string]string{"aileron.ruddervirt.io/efi-populated": valueTrue},
+		},
+	}
+
+	base := fake.NewClientBuilder().WithScheme(vmiScheme(t)).WithObjects(vm, pvc).Build()
+	cl := interceptor.NewClient(base, interceptor.Funcs{
+		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			return errors.New("boom: transient API error")
+		},
+	})
+	v := &VMBooter{Client: cl}
+
+	phase, err := v.HandleVM(context.Background(), build, vmSpec, vmStatus)
+	if err != nil {
+		t.Fatalf("HandleVM should not fail on a transient efivars-ownership error, got: %v", err)
+	}
+	if phase == v1alpha1.VMPhaseFailed {
+		t.Error("HandleVM returned VMPhaseFailed for a transient efivars-ownership error")
 	}
 }

@@ -43,6 +43,12 @@ const (
 	defaultReapPendingAfter = 5 * time.Minute
 )
 
+// boundOrphanGrace is the buffer required past a Bound orphan PVC's own
+// ruddervirt.io/expires-at annotation before it is treated as safe to delete —
+// guards against acting on a clone that is still mid-teardown through the normal
+// (non-force-delete) path.
+const boundOrphanGrace = 1 * time.Hour
+
 var (
 	// pendingClonePVCs gauges clone PVCs that have been Pending past the threshold —
 	// the alerting signal for "PVC stuck Pending for over N minutes".
@@ -175,10 +181,23 @@ func (r *PVCReaper) sweep(ctx context.Context) error {
 		}
 		orphaned++
 
-		// Only Pending orphans that no VM references are deleted. A Bound orphan may
-		// hold a real VM disk, and a referenced PVC (efivars via the hook sidecar, or
-		// a data volume) is still in use — leave both in place.
-		if pvc.Status.Phase != corev1.ClaimPending || referencedPVCs[pvc.Name] {
+		// A referenced PVC (efivars via the hook sidecar, or a data volume) is still in
+		// use by some VM regardless of its own clone's liveness — never delete it.
+		if referencedPVCs[pvc.Name] {
+			remainingByClone[cloneID]++
+			continue
+		}
+
+		// Pending orphans are always safe to delete: they hold no committed data and
+		// are never mounted. Bound orphans may hold a real VM disk, so they are only
+		// deleted when the PVC itself carries a ruddervirt.io/expires-at annotation
+		// (stamped at creation, see EnsureClonePVC) that safely passed — that is the
+		// one signal proving the clone is actually done, not mid-teardown. A Bound
+		// orphan with no stamped expiry (pre-dating that annotation, or any other
+		// edge case) is left in place and only surfaced via the metric below.
+		safeToDelete := pvc.Status.Phase == corev1.ClaimPending ||
+			(pvc.Status.Phase == corev1.ClaimBound && pvcExpiredBefore(pvc, time.Now().Add(-boundOrphanGrace)))
+		if !safeToDelete {
 			remainingByClone[cloneID]++
 			continue
 		}
@@ -189,7 +208,7 @@ func (r *PVCReaper) sweep(ctx context.Context) error {
 			continue
 		}
 		orphanClonePVCsDeleted.Inc()
-		logger.Info("Deleted orphaned Pending clone PVC", "pvc", pvc.Name, "cloneID", cloneID)
+		logger.Info("Deleted orphaned clone PVC", "pvc", pvc.Name, "cloneID", cloneID, "phase", pvc.Status.Phase)
 	}
 
 	pendingClonePVCs.Set(float64(pending))
@@ -212,8 +231,37 @@ func (r *PVCReaper) sweep(ctx context.Context) error {
 	return r.reapOrphanedVMNS(ctx, ns, isLive, remainingByClone)
 }
 
-// liveCloneCRIDs returns the set of CloneIDs for VirtualMachineClones that still exist
-// (an in-progress clone whose VMs are not created yet still owns its Pending PVCs).
+// pvcExpiredBefore reports whether pvc carries a ruddervirt.io/expires-at annotation
+// (stamped at creation time by EnsureClonePVC) that parses and falls before cutoff. A
+// missing or unparseable annotation is treated as "not expired" — the conservative
+// answer, since it means there is no PVC-local signal proving the clone is done.
+func pvcExpiredBefore(pvc *corev1.PersistentVolumeClaim, cutoff time.Time) bool {
+	raw, ok := pvc.Annotations[v1alpha1.AnnotationExpiresAt]
+	if !ok {
+		return false
+	}
+	expiresAt, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return false
+	}
+	return expiresAt.Before(cutoff)
+}
+
+// liveCloneCRIDs returns the set of CloneIDs for VirtualMachineClones that are still
+// in progress — CompletionTime unset — and so still own their (Pending) PVCs before
+// any VM exists to carry the clone label.
+//
+// A completed clone (CompletionTime set) is deliberately excluded even though its CR
+// still exists: nothing in this repo ever deletes a VirtualMachineClone CR once it
+// completes (that is left to whatever created it), so on this cluster completed CRs
+// accumulate indefinitely — treating CR-existence as blanket liveness forever would
+// mean a clone whose VMs were later deleted (external watchdog, expiry, ...) keeps
+// "protecting" its now-orphaned PVCs forever too, with no way for this reaper to ever
+// reclaim them. By the time CompletionTime is stamped the clone's VMs already exist
+// and carry the ruddervirt.io/clone label (EnsureVMs runs well before completion), so
+// vmCloneIDs alone is the authoritative liveness signal from that point on — matching
+// how this cluster's clone CRs are actually ephemeral in practice: the VM label, not
+// the CR, is what should be trusted once provisioning is done.
 func (r *PVCReaper) liveCloneCRIDs(ctx context.Context) (map[string]struct{}, error) {
 	clones := &v1alpha1.VirtualMachineCloneList{}
 	if err := r.Reader.List(ctx, clones); err != nil {
@@ -221,7 +269,11 @@ func (r *PVCReaper) liveCloneCRIDs(ctx context.Context) (map[string]struct{}, er
 	}
 	live := make(map[string]struct{}, len(clones.Items))
 	for i := range clones.Items {
-		if id := clones.Items[i].Status.CloneID; id != "" {
+		c := &clones.Items[i]
+		if c.Status.CompletionTime != nil {
+			continue
+		}
+		if id := c.Status.CloneID; id != "" {
 			live[id] = struct{}{}
 		}
 	}
@@ -281,10 +333,42 @@ func (r *PVCReaper) vmState(ctx context.Context, ns string) (cloneIDs map[string
 	return cloneIDs, referenced, nil
 }
 
-// reapOrphanedVMNS deletes clone-owned VirtualMachineNamespace roots whose clone is
-// dead and whose clone PVCs are all gone. Build-owned VMNS CRs are never touched.
+// liveBuildNames returns the set of "namespace/name" for VirtualMachineBuild CRs that
+// still exist, used to tell whether a build-owned VirtualMachineNamespace root
+// (reapOrphanedVMNS) is orphaned.
+func (r *PVCReaper) liveBuildNames(ctx context.Context) (map[string]struct{}, error) {
+	builds := &v1alpha1.VirtualMachineBuildList{}
+	if err := r.Reader.List(ctx, builds); err != nil {
+		return nil, err
+	}
+	live := make(map[string]struct{}, len(builds.Items))
+	for i := range builds.Items {
+		b := &builds.Items[i]
+		live[b.Namespace+"/"+b.Name] = struct{}{}
+	}
+	return live, nil
+}
+
+// reapOrphanedVMNS deletes VirtualMachineNamespace roots whose owner is gone:
+//   - clone-owned (OwnerRef.Kind == "VirtualMachineClone"): once the clone is dead
+//     (isLive) and all its clone PVCs are gone (remainingByClone), matching how
+//     EnsureClonePVC owns clone PVCs by the VMNS — deleting it early would cascade
+//     an owned PVC that survived the sweep above.
+//   - build-owned (OwnerRef.Kind == "VirtualMachineBuild"): once the named build CR
+//     no longer exists. No build resource is owned by the VMNS root (efivars PVCs are
+//     owned directly by their VM — see ownEFIPVCByVM), so there is nothing to cascade
+//     and no remaining-count gate is needed. Previously nothing reaped these at all:
+//     the only other cleanup path is the VirtualMachineBuild controller's own
+//     handleDeletion, whose VMNS-delete error is only logged, never retried, before
+//     the finalizer is removed regardless — so a transient failure there leaked the
+//     VMNS permanently.
 func (r *PVCReaper) reapOrphanedVMNS(ctx context.Context, ns string, isLive func(string) bool, remainingByClone map[string]int) error {
 	logger := log.FromContext(ctx).WithName("pvc-reaper")
+
+	liveBuilds, err := r.liveBuildNames(ctx)
+	if err != nil {
+		return err
+	}
 
 	vmnsList := &v1alpha1.VirtualMachineNamespaceList{}
 	if err := r.Reader.List(ctx, vmnsList, client.InNamespace(ns)); err != nil {
@@ -292,22 +376,34 @@ func (r *PVCReaper) reapOrphanedVMNS(ctx context.Context, ns string, isLive func
 	}
 	for i := range vmnsList.Items {
 		vmns := &vmnsList.Items[i]
-		if vmns.Spec.OwnerRef == nil || vmns.Spec.OwnerRef.Kind != "VirtualMachineClone" {
+		if vmns.Spec.OwnerRef == nil {
 			continue
 		}
-		cloneID := vmns.Name
-		if isLive(cloneID) {
+
+		switch vmns.Spec.OwnerRef.Kind {
+		case "VirtualMachineClone":
+			cloneID := vmns.Name
+			if isLive(cloneID) {
+				continue
+			}
+			// Wait until no clone PVCs remain for this ID before removing the owner root.
+			if remainingByClone[cloneID] > 0 {
+				continue
+			}
+		case "VirtualMachineBuild":
+			key := vmns.Spec.OwnerRef.Namespace + "/" + vmns.Spec.OwnerRef.Name
+			if _, ok := liveBuilds[key]; ok {
+				continue
+			}
+		default:
 			continue
 		}
-		// Wait until no clone PVCs remain for this ID before removing the owner root.
-		if remainingByClone[cloneID] > 0 {
-			continue
-		}
+
 		if err := r.Client.Delete(ctx, vmns); err != nil && !apierrors.IsNotFound(err) {
-			logger.Error(err, "deleting orphaned VirtualMachineNamespace", "name", cloneID)
+			logger.Error(err, "deleting orphaned VirtualMachineNamespace", "name", vmns.Name, "ownerKind", vmns.Spec.OwnerRef.Kind)
 			continue
 		}
-		logger.Info("Deleted orphaned VirtualMachineNamespace", "name", cloneID)
+		logger.Info("Deleted orphaned VirtualMachineNamespace", "name", vmns.Name, "ownerKind", vmns.Spec.OwnerRef.Kind)
 	}
 	return nil
 }

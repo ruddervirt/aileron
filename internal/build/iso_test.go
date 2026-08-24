@@ -7,6 +7,7 @@ import (
 	"time"
 
 	v1alpha1 "github.com/ruddervirt/aileron/api/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -17,6 +18,9 @@ import (
 func isoScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	s := runtime.NewScheme()
+	if err := corev1.AddToScheme(s); err != nil {
+		t.Fatal(err)
+	}
 	s.AddKnownTypeWithName(dvGVK, &unstructured.Unstructured{})
 	s.AddKnownTypeWithName(schema.GroupVersionKind{
 		Group: dvGVK.Group, Version: dvGVK.Version, Kind: dvGVK.Kind + "List",

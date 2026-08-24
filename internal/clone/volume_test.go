@@ -110,7 +110,7 @@ func TestEnsureClonePVC_EFIVarsNaming(t *testing.T) {
 		RequestedStorage:  "256Mi",
 	}
 
-	_, err := vm.EnsureClonePVC(context.Background(), "ns-abc123", state, "ruddervirt-system", nil)
+	_, err := vm.EnsureClonePVC(context.Background(), "ns-abc123", state, "ruddervirt-system", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +136,7 @@ func TestEnsureClonePVC_DiskNaming(t *testing.T) {
 		RequestedStorage:  "37Gi",
 	}
 
-	_, err := vm.EnsureClonePVC(context.Background(), "ns-abc123", state, "ruddervirt-system", nil)
+	_, err := vm.EnsureClonePVC(context.Background(), "ns-abc123", state, "ruddervirt-system", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,6 +154,69 @@ func TestEnsureClonePVC_DiskNaming(t *testing.T) {
 	}
 	if v := created.Annotations["cdi.kubevirt.io/storage.contentType"]; v != "kubevirt" {
 		t.Errorf("CDI contentType annotation = %q, want kubevirt", v)
+	}
+}
+
+func TestEnsureClonePVC_StampsExpiresAt(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+	seedSnapshot(t, c, "snap-expiry")
+	vm := &VolumeManager{Client: c}
+
+	state := &v1alpha1.CloneVolumeStatus{
+		VolumeName:        "rootdisk",
+		SourceVMShortName: "module",
+		SnapshotName:      "snap-expiry",
+		StorageClassName:  "rook-ceph-block",
+		RequestedStorage:  "37Gi",
+	}
+	expiresAt := metav1.NewTime(time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC))
+
+	if _, err := vm.EnsureClonePVC(context.Background(), "ns-abc123", state, cloneTestNS, nil, &expiresAt); err != nil {
+		t.Fatal(err)
+	}
+
+	created := &corev1.PersistentVolumeClaim{}
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name: state.PersistentVolumeClaimName, Namespace: cloneTestNS,
+	}, created); err != nil {
+		t.Fatal(err)
+	}
+	if v := created.Annotations[v1alpha1.AnnotationExpiresAt]; v != "2026-09-01T00:00:00Z" {
+		t.Errorf("expires-at annotation = %q, want 2026-09-01T00:00:00Z", v)
+	}
+}
+
+func TestEnsureClonePVC_NilExpiresAtLeavesAnnotationUnset(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+	seedSnapshot(t, c, "snap-no-expiry")
+	vm := &VolumeManager{Client: c}
+
+	state := &v1alpha1.CloneVolumeStatus{
+		VolumeName:        "rootdisk",
+		SourceVMShortName: "module",
+		SnapshotName:      "snap-no-expiry",
+		StorageClassName:  "rook-ceph-block",
+		RequestedStorage:  "37Gi",
+	}
+
+	if _, err := vm.EnsureClonePVC(context.Background(), "ns-abc123", state, cloneTestNS, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	created := &corev1.PersistentVolumeClaim{}
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name: state.PersistentVolumeClaimName, Namespace: cloneTestNS,
+	}, created); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := created.Annotations[v1alpha1.AnnotationExpiresAt]; ok {
+		t.Errorf("expires-at annotation should be unset when expiresAt is nil, got %q", created.Annotations[v1alpha1.AnnotationExpiresAt])
 	}
 }
 
@@ -187,7 +250,7 @@ func TestEnsureClonePVC_MultiDiskUnique(t *testing.T) {
 	}
 
 	for _, s := range []*v1alpha1.CloneVolumeStatus{boot, extra} {
-		if _, err := vm.EnsureClonePVC(context.Background(), "ns-abc123", s, "ruddervirt-system", nil); err != nil {
+		if _, err := vm.EnsureClonePVC(context.Background(), "ns-abc123", s, "ruddervirt-system", nil, nil); err != nil {
 			t.Fatalf("EnsureClonePVC(%s): %v", s.VolumeName, err)
 		}
 	}
@@ -886,7 +949,7 @@ func TestEnsureClonePVC_MissingSnapshotFailsFast(t *testing.T) {
 		RequestedStorage:  "37Gi",
 	}
 
-	_, err := vm.EnsureClonePVC(context.Background(), "ns-abc123", state, "ruddervirt-system", nil)
+	_, err := vm.EnsureClonePVC(context.Background(), "ns-abc123", state, "ruddervirt-system", nil, nil)
 	if err == nil {
 		t.Fatal("expected error for missing snapshot, got nil")
 	}
@@ -932,7 +995,7 @@ func TestEnsureClonePVC_TerminatingSnapshotFailsFast(t *testing.T) {
 		RequestedStorage:  "37Gi",
 	}
 
-	_, err := vm.EnsureClonePVC(context.Background(), "ns-abc123", state, "ruddervirt-system", nil)
+	_, err := vm.EnsureClonePVC(context.Background(), "ns-abc123", state, "ruddervirt-system", nil, nil)
 	if !IsSnapshotUnusable(err) {
 		t.Fatalf("error = %v, want ErrSnapshotUnusable", err)
 	}
@@ -965,7 +1028,7 @@ func TestEnsureClonePVC_SetsOwnerReference(t *testing.T) {
 		RequestedStorage:  "37Gi",
 	}
 
-	if _, err := vm.EnsureClonePVC(context.Background(), "ns-abc123", state, "ruddervirt-system", owner); err != nil {
+	if _, err := vm.EnsureClonePVC(context.Background(), "ns-abc123", state, "ruddervirt-system", owner, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1026,7 +1089,7 @@ func TestEnsureClonePVC_ForeignBindReleased(t *testing.T) {
 		RequestedStorage:          "256Mi",
 	}
 
-	ready, err := vm.EnsureClonePVC(context.Background(), "ns-abc123", state, "ruddervirt-system", nil)
+	ready, err := vm.EnsureClonePVC(context.Background(), "ns-abc123", state, "ruddervirt-system", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1079,7 +1142,7 @@ func TestEnsureClonePVC_LegitBindReady(t *testing.T) {
 		RequestedStorage:          "37Gi",
 	}
 
-	ready, err := vm.EnsureClonePVC(context.Background(), "ns-abc123", state, "ruddervirt-system", nil)
+	ready, err := vm.EnsureClonePVC(context.Background(), "ns-abc123", state, "ruddervirt-system", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

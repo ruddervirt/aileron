@@ -65,6 +65,17 @@ func (v *VMBooter) HandleVM(ctx context.Context, build *v1alpha1.VirtualMachineB
 			// Fall through to recreate with correct spec.
 		} else {
 			vmStatus.VMName = vmName
+			// Own the efivars PVC by this VM as soon as it's confirmed to exist —
+			// not just later at TemplateProvisioning. A build VM spends most of its
+			// life (Booting/Provisioning/CapturingDisks) before ever reaching that
+			// final phase, and until this ownership is set the PVC has no owner at
+			// all; a VM deleted anywhere in that window (external watchdog, a bare
+			// "kubectl delete vm") would otherwise orphan it. Best-effort: this is a
+			// resilience measure, not core booting logic, and must not fail this
+			// VM's phase over a transient patch failure.
+			if vmSpec.EFIFirmware != nil {
+				ownEFIPVCByVMBestEffort(ctx, v.Client, buildNS, efiPVCName(BuildID(build), vmSpec.Name), existing)
+			}
 			state, msg, err := v.checkVMI(ctx, vmName, buildNS)
 			if err != nil {
 				return v1alpha1.VMPhaseBooting, fmt.Errorf("checking VMI readiness: %w", err)
@@ -100,6 +111,12 @@ func (v *VMBooter) HandleVM(ctx context.Context, build *v1alpha1.VirtualMachineB
 	}
 
 	vmStatus.VMName = vmName
+	// vm now carries its server-assigned UID from Create — own the efivars PVC
+	// immediately rather than waiting for the next reconcile. See the comment on
+	// the other call site above for why this matters and why it's best-effort.
+	if vmSpec.EFIFirmware != nil {
+		ownEFIPVCByVMBestEffort(ctx, v.Client, buildNS, efiPVCName(BuildID(build), vmSpec.Name), vm)
+	}
 	return v1alpha1.VMPhaseBooting, nil
 }
 

@@ -144,7 +144,7 @@ For common cases, omit `network` or `nics`. Auto-creation covers a VPC, subnet, 
 **Provisioners** — an ordered list, each completes before the next starts:
 - `shell` — **`inline` is a single script string** (`inline: |`), not command list. Each shell provisioner runs one script; use multiple provisioners for multiple scripts, as variables and state don't carry over. `env` sets environment vars; `executeCommand` changes the command wrapper (useful for `sudo -S` with a piped password).
 - `file` — uploads a file from `source` (ConfigMap/Secret) or `fileRef` (references `spec.files[].name`) to `destination`.
-- `reboot` — reboots and waits for SSH to drop and return; `command` changes the default (`sudo reboot`/`shutdown /r /f /t 0`).
+- `reboot` — reboots and waits for SSH to drop and return; `command` changes the default (`sudo reboot`/`shutdown /r /f /t 0`). This provisioner the only safe way to restart a virtual machine during a build. You may be able to reboot using standard shell commands, but you might experience a race condition from the next provisioner (where the next provisioner would start quickly and then the machine would reboot).
 - `windows-update` — runs a search/filter/reboot loop like `packer-plugin-windows-update`; `searchCriteria` defaults to recommended updates, `filters[]` are PowerShell expressions (`"include:..."`/`"exclude:..."`), `updateLimit` caps updates per cycle (default 1000).
 - `handbuild` — pauses the build for manual VM interaction over VNC; resumes on a "continue" signal. `instructions` are shown in the UI while paused.
 
@@ -465,6 +465,7 @@ On success, `status.templateNamespace` (equal to `status.buildNamespace`) is wha
 - Pin `nics[].slot` for any interface whose in-guest identity must survive a layered build or clone.
 - `source.buildRef` requires the parent build to be `Succeeded` — it fails immediately otherwise.
 - `cloudInit` is attached only if the field is present; an empty `{}` works, but omit it entirely to skip the cloud-init disk.
+- Never trigger a reboot from inside a `shell` provisioner (`Restart-Computer`, `shutdown.exe`, `sudo reboot`, etc.) — the coordinator moves to the next provisioner as soon as the script exits, and it will race the reboot and fail with a dropped connection (e.g. `SFTP ... unexpected EOF`) or a Task Scheduler termination code. Use a dedicated `reboot` provisioner step, which waits for SSH to drop and come back before continuing.
 
 ### Troubleshooting Pointers
 

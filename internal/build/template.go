@@ -3,6 +3,7 @@ package build
 import (
 	"context"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 
 	v1alpha1 "github.com/ruddervirt/aileron/api/v1alpha1"
@@ -12,6 +13,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -34,7 +36,13 @@ func (t *TemplateProvisioner) Handle(ctx context.Context, build *v1alpha1.Virtua
 	buildNS := BuildNS(build)
 
 	// Step 1: Delete non-VM ephemeral resources (source DVs, ISOs, relay pod, etc.).
-	t.cleanupEphemeralResources(ctx, build, buildNS)
+	// A failure here (e.g. a transient API error or a CDI finalizer race) must keep
+	// the build in this same phase so the next reconcile retries the sweep — this
+	// phase never runs again once it advances to BuildPhaseSucceeded, so a
+	// fire-and-forget delete here would otherwise orphan the resource permanently.
+	if err := t.cleanupEphemeralResources(ctx, build, buildNS); err != nil {
+		return v1alpha1.BuildPhaseTemplateProvisioning, fmt.Errorf("cleaning up ephemeral build resources: %w", err)
+	}
 
 	// Build the network topology annotation (shared across all template VMs).
 	topoAnnotation := t.buildNetworkTopology(build)
@@ -63,8 +71,15 @@ func (t *TemplateProvisioner) Handle(ctx context.Context, build *v1alpha1.Virtua
 // cleanupEphemeralResources deletes source DVs, ISOs, relay pod, SSH secret,
 // and egress gateways from the build namespace. Build VMs are NOT deleted —
 // they are converted to templates in-place by convertToTemplate.
-func (t *TemplateProvisioner) cleanupEphemeralResources(ctx context.Context, build *v1alpha1.VirtualMachineBuild, buildNS string) {
-	logger := log.FromContext(ctx)
+//
+// Every delete failure is collected and returned (joined) rather than only logged:
+// Handle keeps the build in TemplateProvisioning when this returns an error, so the
+// next reconcile retries the sweep. Handle only advances past this phase once cleanup
+// has actually succeeded (or the resource is already gone, per errors.IsNotFound) —
+// this phase never runs again afterward, so a swallowed failure here previously
+// orphaned the resource (most notably the per-VM "-src-" DataVolume) permanently.
+func (t *TemplateProvisioner) cleanupEphemeralResources(ctx context.Context, build *v1alpha1.VirtualMachineBuild, buildNS string) error {
+	var errs []error
 
 	// Delete source DVs (the import DVs, not the output DVs) — boot disk and
 	// every secondary disk, now that DiskCapturer has cloned each into its
@@ -77,8 +92,8 @@ func (t *TemplateProvisioner) cleanupEphemeralResources(ctx context.Context, bui
 		})
 		dv.SetName(dvName)
 		dv.SetNamespace(buildNS)
-		if err := t.Client.Delete(ctx, dv); err != nil && !errors.IsNotFound(err) {
-			logger.Error(err, "Failed to delete source DV", "dv", dvName)
+		if err := t.deleteAndCollect(ctx, dv, "source DV "+dvName); err != nil {
+			errs = append(errs, err)
 		}
 
 		for i, disk := range DefaultDisks(&vmSpec) {
@@ -92,8 +107,8 @@ func (t *TemplateProvisioner) cleanupEphemeralResources(ctx context.Context, bui
 			})
 			extraDV.SetName(extraDVName)
 			extraDV.SetNamespace(buildNS)
-			if err := t.Client.Delete(ctx, extraDV); err != nil && !errors.IsNotFound(err) {
-				logger.Error(err, "Failed to delete source DV", "dv", extraDVName)
+			if err := t.deleteAndCollect(ctx, extraDV, "source DV "+extraDVName); err != nil {
+				errs = append(errs, err)
 			}
 		}
 	}
@@ -109,30 +124,30 @@ func (t *TemplateProvisioner) cleanupEphemeralResources(ctx context.Context, bui
 			"ruddervirt.io/iso-clone": "true",
 			LabelBuildID:              BuildID(build),
 		},
-	); err == nil {
+	); err != nil {
+		log.FromContext(ctx).Error(err, "Failed to list ISO clone DVs")
+		errs = append(errs, fmt.Errorf("listing ISO clone DVs: %w", err))
+	} else {
 		for i := range isoCloneList.Items {
-			if err := t.Client.Delete(ctx, &isoCloneList.Items[i]); err != nil && !errors.IsNotFound(err) {
-				logger.Error(err, "Failed to delete ISO clone DV", "dv", isoCloneList.Items[i].GetName())
+			dv := &isoCloneList.Items[i]
+			if err := t.deleteAndCollect(ctx, dv, "ISO clone DV "+dv.GetName()); err != nil {
+				errs = append(errs, err)
 			}
 		}
 	}
 
 	// Delete relay pod.
 	relayPodName := RelayPodName(BuildID(build))
-	pod := &corev1.Pod{}
-	pod.Name = relayPodName
-	pod.Namespace = buildNS
-	if err := t.Client.Delete(ctx, pod); err != nil && !errors.IsNotFound(err) {
-		logger.Error(err, "Failed to delete relay pod", "pod", relayPodName)
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: relayPodName, Namespace: buildNS}}
+	if err := t.deleteAndCollect(ctx, pod, "relay pod "+relayPodName); err != nil {
+		errs = append(errs, err)
 	}
 
 	// Delete SSH key secret.
 	secretName := SSHKeySecretName(BuildID(build))
-	secret := &corev1.Secret{}
-	secret.Name = secretName
-	secret.Namespace = buildNS
-	if err := t.Client.Delete(ctx, secret); err != nil && !errors.IsNotFound(err) {
-		logger.Error(err, "Failed to delete SSH secret", "secret", secretName)
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: buildNS}}
+	if err := t.deleteAndCollect(ctx, secret, "SSH secret "+secretName); err != nil {
+		errs = append(errs, err)
 	}
 
 	// VPCs, subnets, and NADs are kept as part of the template (clones
@@ -142,10 +157,24 @@ func (t *TemplateProvisioner) cleanupEphemeralResources(ctx context.Context, bui
 		for _, vpcName := range build.Status.Network.VPCsCreated {
 			gwName := vpcName + "-egress"
 			if err := network.DeleteEgressGateway(ctx, t.Client, gwName, buildNS); err != nil {
-				logger.Error(err, "Failed to delete egress gateway", "gateway", gwName)
+				log.FromContext(ctx).Error(err, "Failed to delete egress gateway", "gateway", gwName)
+				errs = append(errs, fmt.Errorf("deleting egress gateway %s: %w", gwName, err))
 			}
 		}
 	}
+
+	return stderrors.Join(errs...)
+}
+
+// deleteAndCollect deletes obj, treating "already gone" as success, and returns a
+// logged, wrapped error otherwise — the shared shape behind
+// cleanupEphemeralResources' delete call sites.
+func (t *TemplateProvisioner) deleteAndCollect(ctx context.Context, obj client.Object, desc string) error {
+	if err := t.Client.Delete(ctx, obj); err != nil && !errors.IsNotFound(err) {
+		log.FromContext(ctx).Error(err, "Failed to delete "+desc)
+		return fmt.Errorf("deleting %s: %w", desc, err)
+	}
+	return nil
 }
 
 // convertToTemplate patches a halted build VM in-place to become a template VM.
@@ -169,6 +198,15 @@ func (t *TemplateProvisioner) convertToTemplate(ctx context.Context, build *v1al
 		if err := t.Client.Get(ctx, types.NamespacedName{Name: vmName, Namespace: namespace}, vm); err != nil {
 			return fmt.Errorf("getting build VM: %w", err)
 		}
+
+		// Own the efivars PVC by this VM now that the VM is known to exist (it cannot
+		// be set at PVC-creation time in ensureEFIPVC; also patched earlier, in
+		// VMBooter.HandleVM, as soon as the VM first exists — this is a defensive
+		// backstop, not the only chance). Idempotent, so safe to run on every
+		// reconcile including the already-converted short-circuit below. Best-effort:
+		// this is a resilience measure, not core conversion logic, and must not turn a
+		// transient error into a permanently failed build (see ownEFIPVCByVMBestEffort).
+		ownEFIPVCByVMBestEffort(ctx, t.Client, namespace, efiPVCName(BuildID(build), vmSpec.Name), vm)
 
 		// Already converted — idempotent. A prior retry attempt may have
 		// succeeded server-side even when the local Update returned

@@ -20,6 +20,7 @@ package controller
 import (
 	"context"
 	"testing"
+	"time"
 
 	v1alpha1 "github.com/ruddervirt/aileron/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
@@ -60,6 +61,14 @@ func clonePVC(name, cloneID string, phase corev1.PersistentVolumeClaimPhase, vol
 		Spec:   corev1.PersistentVolumeClaimSpec{VolumeName: volumeName},
 		Status: corev1.PersistentVolumeClaimStatus{Phase: phase},
 	}
+}
+
+// clonePVCWithExpiry builds a Bound clone PVC (owned by the "ns-dead" clone) carrying
+// a ruddervirt.io/expires-at annotation, as EnsureClonePVC stamps at creation.
+func clonePVCWithExpiry(name string, expiresAt time.Time) *corev1.PersistentVolumeClaim {
+	pvc := clonePVC(name, "ns-dead", corev1.ClaimBound, "pv-ceph-37gi")
+	pvc.Annotations = map[string]string{v1alpha1.AnnotationExpiresAt: expiresAt.UTC().Format(time.RFC3339)}
+	return pvc
 }
 
 func vmReferencingPVC(name, claimName string) *unstructured.Unstructured {
@@ -147,6 +156,30 @@ func TestReaper_KeepsInProgressClonePVC(t *testing.T) {
 	}
 }
 
+// TestReaper_ReapsOrphanWithCompletedCloneCR: on this cluster nothing ever deletes a
+// VirtualMachineClone CR once it completes, so a completed CR (CompletionTime set)
+// must NOT give its PVCs blanket protection forever — only an in-progress CR (no
+// CompletionTime yet) does. A Pending orphan whose only "liveness" is a long-completed
+// CR (its VM already deleted) must still be reaped.
+func TestReaper_ReapsOrphanWithCompletedCloneCR(t *testing.T) {
+	completedAt := metav1.Now()
+	completedClone := &v1alpha1.VirtualMachineClone{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-clone", Namespace: reaperNS},
+		Status:     v1alpha1.VirtualMachineCloneStatus{CloneID: "ns-dead", CompletionTime: &completedAt},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(reaperScheme(t)).
+		WithObjects(clonePVC("ns-dead-module-efivars", "ns-dead", corev1.ClaimPending, ""), completedClone).
+		Build()
+
+	if err := newReaper(c).sweep(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if pvcExists(t, c, "ns-dead-module-efivars") {
+		t.Fatal("orphaned Pending PVC protected only by a completed, VM-less clone CR was not deleted")
+	}
+}
+
 // TestReaper_KeepsBoundOrphan: a Bound orphan may hold a real VM disk, so the reaper
 // must NOT auto-delete it even when the clone is fully dead — it only surfaces via a
 // metric. This prevents wholesale deletion of committed clone storage.
@@ -161,6 +194,79 @@ func TestReaper_KeepsBoundOrphan(t *testing.T) {
 	}
 	if !pvcExists(t, c, "ns-dead-server-rootdisk") {
 		t.Fatal("Bound orphan PVC was deleted; committed disk data must be preserved")
+	}
+}
+
+// TestReaper_ReapsExpiredBoundOrphan: a Bound orphan whose own ruddervirt.io/expires-at
+// annotation safely passed is the one case pvc_reaper.go can prove is done, not just
+// dead — e.g. a clone deleted via a force-delete that skipped the finalizer sweep.
+func TestReaper_ReapsExpiredBoundOrphan(t *testing.T) {
+	c := fake.NewClientBuilder().
+		WithScheme(reaperScheme(t)).
+		WithObjects(clonePVCWithExpiry("ns-dead-server-rootdisk", time.Now().Add(-48*time.Hour))).
+		Build()
+
+	if err := newReaper(c).sweep(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if pvcExists(t, c, "ns-dead-server-rootdisk") {
+		t.Fatal("Bound orphan PVC past its stamped expiry (plus grace) was not deleted")
+	}
+}
+
+// TestReaper_KeepsBoundOrphanWithinGrace: an expiry that only just passed stays within
+// boundOrphanGrace, so the PVC must be retained — the grace window guards against
+// racing a clone that is still tearing down through the normal path.
+func TestReaper_KeepsBoundOrphanWithinGrace(t *testing.T) {
+	c := fake.NewClientBuilder().
+		WithScheme(reaperScheme(t)).
+		WithObjects(clonePVCWithExpiry("ns-dead-server-rootdisk", time.Now().Add(-5*time.Minute))).
+		Build()
+
+	if err := newReaper(c).sweep(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !pvcExists(t, c, "ns-dead-server-rootdisk") {
+		t.Fatal("Bound orphan PVC still within the grace window was wrongly deleted")
+	}
+}
+
+// TestReaper_KeepsBoundOrphanWithFutureExpiry guards against a clock-skew or
+// misresolved-expiry edge case: an expires-at in the future must never be reaped.
+func TestReaper_KeepsBoundOrphanWithFutureExpiry(t *testing.T) {
+	c := fake.NewClientBuilder().
+		WithScheme(reaperScheme(t)).
+		WithObjects(clonePVCWithExpiry("ns-dead-server-rootdisk", time.Now().Add(24*time.Hour))).
+		Build()
+
+	if err := newReaper(c).sweep(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !pvcExists(t, c, "ns-dead-server-rootdisk") {
+		t.Fatal("Bound orphan PVC with a future expires-at was wrongly deleted")
+	}
+}
+
+// TestReaper_KeepsExpiredBoundOrphanReferencedByHook: even an expired Bound orphan must
+// never be deleted while a live VM still references it via the hook sidecar annotation.
+func TestReaper_KeepsExpiredBoundOrphanReferencedByHook(t *testing.T) {
+	c := fake.NewClientBuilder().
+		WithScheme(reaperScheme(t)).
+		WithObjects(clonePVCWithExpiry("ns-dead-module-efivars", time.Now().Add(-48*time.Hour))).
+		Build()
+	vm := vmReferencingPVC("ns-dead-module", "ns-dead-module-rootdisk")
+	_ = unstructured.SetNestedField(vm.Object,
+		`[{"pvc":{"name":"ns-dead-module-efivars"}}]`,
+		"spec", "template", "metadata", "annotations", "hooks.kubevirt.io/hookSidecars")
+	if err := c.Create(context.Background(), vm); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := newReaper(c).sweep(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !pvcExists(t, c, "ns-dead-module-efivars") {
+		t.Fatal("expired Bound orphan still referenced via hook annotation was wrongly deleted")
 	}
 }
 
@@ -189,20 +295,32 @@ func TestReaper_KeepsEFIVarsReferencedByHook(t *testing.T) {
 	}
 }
 
-// TestReaper_ReapsOrphanedCloneVMNS deletes a clone's owner root once its PVCs are
-// gone, but never touches a build-owned VirtualMachineNamespace.
-func TestReaper_ReapsOrphanedCloneVMNS(t *testing.T) {
+// TestReaper_ReapsOrphanedVMNS deletes a clone's owner root once its PVCs are gone,
+// and (unlike the reaper's previous behavior) also deletes a build-owned
+// VirtualMachineNamespace once its parent VirtualMachineBuild CR is gone — the only
+// other cleanup path was VirtualMachineBuild's own handleDeletion, whose VMNS-delete
+// error is only logged, never retried, before the finalizer is removed regardless, so
+// a transient failure there previously leaked the VMNS permanently. A build-owned VMNS
+// whose build CR is still live must never be touched.
+func TestReaper_ReapsOrphanedVMNS(t *testing.T) {
 	cloneVMNS := &v1alpha1.VirtualMachineNamespace{
 		ObjectMeta: metav1.ObjectMeta{Name: "ns-dead", Namespace: reaperNS},
 		Spec:       v1alpha1.VirtualMachineNamespaceSpec{OwnerRef: &v1alpha1.VirtualMachineNamespaceOwnerRef{Kind: "VirtualMachineClone", Name: "clone-x"}},
 	}
-	buildVMNS := &v1alpha1.VirtualMachineNamespace{
-		ObjectMeta: metav1.ObjectMeta{Name: "vm-build1", Namespace: reaperNS},
-		Spec:       v1alpha1.VirtualMachineNamespaceSpec{OwnerRef: &v1alpha1.VirtualMachineNamespaceOwnerRef{Kind: "VirtualMachineBuild", Name: "build-x"}},
+	deadBuildVMNS := &v1alpha1.VirtualMachineNamespace{
+		ObjectMeta: metav1.ObjectMeta{Name: "vm-dead-build", Namespace: reaperNS},
+		Spec:       v1alpha1.VirtualMachineNamespaceSpec{OwnerRef: &v1alpha1.VirtualMachineNamespaceOwnerRef{Kind: "VirtualMachineBuild", Name: "build-gone", Namespace: reaperNS}},
+	}
+	liveBuild := &v1alpha1.VirtualMachineBuild{
+		ObjectMeta: metav1.ObjectMeta{Name: "build-live", Namespace: reaperNS},
+	}
+	liveBuildVMNS := &v1alpha1.VirtualMachineNamespace{
+		ObjectMeta: metav1.ObjectMeta{Name: "vm-live-build", Namespace: reaperNS},
+		Spec:       v1alpha1.VirtualMachineNamespaceSpec{OwnerRef: &v1alpha1.VirtualMachineNamespaceOwnerRef{Kind: "VirtualMachineBuild", Name: "build-live", Namespace: reaperNS}},
 	}
 	c := fake.NewClientBuilder().
 		WithScheme(reaperScheme(t)).
-		WithObjects(cloneVMNS, buildVMNS).
+		WithObjects(cloneVMNS, deadBuildVMNS, liveBuild, liveBuildVMNS).
 		Build()
 
 	if err := newReaper(c).sweep(context.Background()); err != nil {
@@ -216,7 +334,10 @@ func TestReaper_ReapsOrphanedCloneVMNS(t *testing.T) {
 	if vmnsExists("ns-dead") {
 		t.Error("orphaned clone VirtualMachineNamespace was not deleted")
 	}
-	if !vmnsExists("vm-build1") {
-		t.Error("build-owned VirtualMachineNamespace was wrongly deleted")
+	if vmnsExists("vm-dead-build") {
+		t.Error("build-owned VirtualMachineNamespace whose build CR is gone was not deleted")
+	}
+	if !vmnsExists("vm-live-build") {
+		t.Error("build-owned VirtualMachineNamespace whose build CR is still live was wrongly deleted")
 	}
 }

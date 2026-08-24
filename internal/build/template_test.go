@@ -2,17 +2,21 @@ package build
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
 	v1alpha1 "github.com/ruddervirt/aileron/api/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 // volumeByName returns the volume map with the given name, or nil.
@@ -193,7 +197,9 @@ func TestCleanupEphemeralResources_ISOCloneScopedToBuild(t *testing.T) {
 		Status:     v1alpha1.VirtualMachineBuildStatus{BuildID: "bld-a"},
 	}
 
-	tp.cleanupEphemeralResources(context.Background(), build, "ruddervirt-system")
+	if err := tp.cleanupEphemeralResources(context.Background(), build, "ruddervirt-system"); err != nil {
+		t.Fatalf("cleanupEphemeralResources: %v", err)
+	}
 
 	got := &unstructured.Unstructured{}
 	got.SetGroupVersionKind(dvGVK)
@@ -211,11 +217,100 @@ func TestCleanupEphemeralResources_ISOCloneScopedToBuild(t *testing.T) {
 	}
 }
 
+// TestCleanupEphemeralResources_ReturnsErrorOnDeleteFailure confirms a transient
+// delete failure (e.g. an API blip or a CDI finalizer race) is surfaced as an error
+// instead of only logged — this phase runs exactly once per build, so a swallowed
+// failure previously orphaned the resource (most notably the "-src-" DataVolume)
+// permanently since nothing ever retried the sweep.
+func TestCleanupEphemeralResources_ReturnsErrorOnDeleteFailure(t *testing.T) {
+	srcDVName := BuildNameForBuildVMDataVolume("bld-a", "webserver")
+	srcDV := &unstructured.Unstructured{}
+	srcDV.SetGroupVersionKind(dvGVK)
+	srcDV.SetName(srcDVName)
+	srcDV.SetNamespace("ruddervirt-system")
+
+	base := fake.NewClientBuilder().WithScheme(isoScheme(t)).WithObjects(srcDV).Build()
+	boom := errors.New("boom: transient API error")
+	cl := interceptor.NewClient(base, interceptor.Funcs{
+		Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			if obj.GetName() == srcDVName {
+				return boom
+			}
+			return c.Delete(ctx, obj, opts...)
+		},
+	})
+	tp := &TemplateProvisioner{Client: cl}
+
+	build := &v1alpha1.VirtualMachineBuild{
+		ObjectMeta: metav1.ObjectMeta{Name: "bld-a", Namespace: "ruddervirt-system"},
+		Status:     v1alpha1.VirtualMachineBuildStatus{BuildID: "bld-a"},
+		Spec:       v1alpha1.VirtualMachineBuildSpec{VMs: []v1alpha1.BuildVM{{Name: "webserver"}}},
+	}
+
+	err := tp.cleanupEphemeralResources(context.Background(), build, "ruddervirt-system")
+	if err == nil {
+		t.Fatal("expected an error when the source DV delete fails, got nil")
+	}
+	if !errors.Is(err, boom) {
+		t.Errorf("expected error chain to include the delete failure, got: %v", err)
+	}
+
+	got := &unstructured.Unstructured{}
+	got.SetGroupVersionKind(dvGVK)
+	if err := cl.Get(context.Background(), types.NamespacedName{Name: srcDVName, Namespace: "ruddervirt-system"}, got); err != nil {
+		t.Errorf("source DV should still exist after a failed delete, got error: %v", err)
+	}
+}
+
+// TestHandle_KeepsTemplateProvisioningPhaseOnCleanupFailure confirms a cleanup
+// failure keeps the build in BuildPhaseTemplateProvisioning (so the controller
+// requeues and retries the same phase) rather than transitioning to
+// BuildPhaseFailed, which is terminal and would never retry.
+func TestHandle_KeepsTemplateProvisioningPhaseOnCleanupFailure(t *testing.T) {
+	srcDVName := BuildNameForBuildVMDataVolume("bld-a", "webserver")
+	srcDV := &unstructured.Unstructured{}
+	srcDV.SetGroupVersionKind(dvGVK)
+	srcDV.SetName(srcDVName)
+	srcDV.SetNamespace("ruddervirt-system")
+
+	base := fake.NewClientBuilder().WithScheme(isoScheme(t)).WithObjects(srcDV).Build()
+	cl := interceptor.NewClient(base, interceptor.Funcs{
+		Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			if obj.GetName() == srcDVName {
+				return errors.New("boom: transient API error")
+			}
+			return c.Delete(ctx, obj, opts...)
+		},
+	})
+	tp := &TemplateProvisioner{Client: cl}
+
+	build := &v1alpha1.VirtualMachineBuild{
+		ObjectMeta: metav1.ObjectMeta{Name: "bld-a", Namespace: "ruddervirt-system"},
+		Status:     v1alpha1.VirtualMachineBuildStatus{BuildID: "bld-a", Phase: v1alpha1.BuildPhaseTemplateProvisioning},
+		Spec:       v1alpha1.VirtualMachineBuildSpec{VMs: []v1alpha1.BuildVM{{Name: "webserver"}}},
+	}
+
+	phase, err := tp.Handle(context.Background(), build)
+	if err == nil {
+		t.Fatal("expected Handle to return an error when cleanup fails")
+	}
+	if phase != v1alpha1.BuildPhaseTemplateProvisioning {
+		t.Errorf("phase = %q, want BuildPhaseTemplateProvisioning so the controller retries", phase)
+	}
+}
+
 var vmGVK = schema.GroupVersionKind{Group: "kubevirt.io", Version: "v1", Kind: "VirtualMachine"}
+
+// testVMUID is the shared fake UID used across efifirmware_test.go, template_test.go,
+// and vm_test.go's ownEFIPVCByVM-related tests.
+const testVMUID = "vm-uid-1"
 
 func vmScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	s := runtime.NewScheme()
+	if err := corev1.AddToScheme(s); err != nil {
+		t.Fatal(err)
+	}
 	s.AddKnownTypeWithName(vmGVK, &unstructured.Unstructured{})
 	s.AddKnownTypeWithName(schema.GroupVersionKind{
 		Group: vmGVK.Group, Version: vmGVK.Version, Kind: vmGVK.Kind + "List",
@@ -259,6 +354,82 @@ func TestConvertToTemplate_PreservesInvisibleAnnotation(t *testing.T) {
 	}
 	if annotation := got.GetAnnotations()[v1alpha1.AnnotationInvisible]; annotation != valueTrue {
 		t.Errorf("annotations[%s] = %q, want %q", v1alpha1.AnnotationInvisible, annotation, valueTrue)
+	}
+}
+
+// TestConvertToTemplate_OwnsEFIVarsPVCByVM confirms converting a build VM into a
+// template also patches its efivars PVC to be owned by that VM — previously the PVC
+// had no owner at all, so a template VM deleted directly (bypassing the parent
+// VirtualMachineBuild CR's own delete/cleanup path, e.g. by an external watchdog)
+// orphaned the PVC forever.
+func TestConvertToTemplate_OwnsEFIVarsPVCByVM(t *testing.T) {
+	vm := &unstructured.Unstructured{}
+	vm.SetGroupVersionKind(vmGVK)
+	vm.SetName("bld-webserver")
+	vm.SetNamespace("vm-bld")
+	vm.SetUID(testVMUID)
+
+	efivars := efiPVCFor()
+
+	cl := fake.NewClientBuilder().WithScheme(vmScheme(t)).WithObjects(vm, efivars).Build()
+	tp := &TemplateProvisioner{Client: cl}
+
+	build := &v1alpha1.VirtualMachineBuild{
+		ObjectMeta: metav1.ObjectMeta{Name: "bld", Namespace: "ruddervirt-system"},
+		Status:     v1alpha1.VirtualMachineBuildStatus{BuildID: "bld"},
+	}
+	vmSpec := &v1alpha1.BuildVM{Name: "webserver", Source: v1alpha1.BuildSource{Blank: true}}
+
+	if _, err := tp.convertToTemplate(context.Background(), build, "vm-bld", "bld-webserver", "bld-out-webserver", vmSpec, ""); err != nil {
+		t.Fatalf("convertToTemplate: %v", err)
+	}
+
+	got := &corev1.PersistentVolumeClaim{}
+	if err := cl.Get(context.Background(), types.NamespacedName{Name: "bld-webserver-efivars", Namespace: "vm-bld"}, got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.OwnerReferences) != 1 || got.OwnerReferences[0].UID != testVMUID {
+		t.Errorf("efivars PVC ownerReferences = %v, want owned by VM vm-uid-1", got.OwnerReferences)
+	}
+}
+
+// TestConvertToTemplate_EFIOwnershipFailureDoesNotFailConversion confirms a transient
+// failure patching the efivars PVC's ownership never fails template conversion —
+// ownEFIPVCByVMBestEffort must swallow it, not propagate it up into
+// BuildPhaseFailed (which is terminal and would permanently fail an otherwise
+// successful build over a missed metadata patch).
+func TestConvertToTemplate_EFIOwnershipFailureDoesNotFailConversion(t *testing.T) {
+	vm := &unstructured.Unstructured{}
+	vm.SetGroupVersionKind(vmGVK)
+	vm.SetName("bld-webserver")
+	vm.SetNamespace("vm-bld")
+	vm.SetUID(testVMUID)
+
+	efivars := efiPVCFor()
+
+	base := fake.NewClientBuilder().WithScheme(vmScheme(t)).WithObjects(vm, efivars).Build()
+	cl := interceptor.NewClient(base, interceptor.Funcs{
+		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			if _, ok := obj.(*corev1.PersistentVolumeClaim); ok {
+				return errors.New("boom: transient API error")
+			}
+			return c.Update(ctx, obj, opts...)
+		},
+	})
+	tp := &TemplateProvisioner{Client: cl}
+
+	build := &v1alpha1.VirtualMachineBuild{
+		ObjectMeta: metav1.ObjectMeta{Name: "bld", Namespace: "ruddervirt-system"},
+		Status:     v1alpha1.VirtualMachineBuildStatus{BuildID: "bld"},
+	}
+	vmSpec := &v1alpha1.BuildVM{Name: "webserver", Source: v1alpha1.BuildSource{Blank: true}}
+
+	converted, err := tp.convertToTemplate(context.Background(), build, "vm-bld", "bld-webserver", "bld-out-webserver", vmSpec, "")
+	if err != nil {
+		t.Fatalf("convertToTemplate should not fail on a transient efivars-ownership error, got: %v", err)
+	}
+	if !converted {
+		t.Fatal("expected VM to still be converted despite the efivars-ownership failure")
 	}
 }
 
