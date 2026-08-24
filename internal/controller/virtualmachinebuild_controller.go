@@ -346,6 +346,21 @@ func (r *VirtualMachineBuildReconciler) Reconcile(ctx context.Context, req ctrl.
 			} else if remaining := r.cleanupBuildResources(ctx, vmBuild); remaining > 0 {
 				logger.Info("Build resources still being deleted, requeueing", "remaining", remaining)
 				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+			} else if requeue, err := r.teardownBuildNetworkAndVMNS(ctx, vmBuild); err != nil {
+				// Failed builds are kept as queryable records — the CR itself is
+				// never deleted here (only deleteIfUnclonableTooLong ever deletes a
+				// build CR, and only for Succeeded builds whose template later goes
+				// unclonable). Without this step, a Failed build's VPCs, subnets,
+				// and VirtualMachineNamespace root leaked forever: they're only
+				// otherwise torn down by handleDeletion's ordered teardown, which
+				// only runs when the CR is deleted. Confirmed live on rudderusa:
+				// ~318 VPCs and ~320 subnets attributable to builds already past
+				// FAILURE_RETENTION, out of ~1,242 VPCs total in the cluster.
+				logger.Error(err, "Network teardown failed for Failed build, requeueing")
+				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+			} else if requeue {
+				logger.Info("Failed build's network resources still present, requeueing")
+				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 			}
 		}
 
@@ -505,8 +520,38 @@ func (r *VirtualMachineBuildReconciler) handleDeletion(ctx context.Context, vmBu
 	// before we delete subnets — otherwise KubeOVN's finalizer blocks.
 	r.cleanupBuildResources(ctx, vmBuild)
 
-	// Step 2: Network cleanup — now that VMs/pods are gone, KubeOVN can
-	// release IPs and remove its subnet finalizer naturally.
+	// Steps 2-3: network + VirtualMachineNamespace teardown, shared with the
+	// Failed-build retention cleanup path below (see its comment for why a
+	// Failed build — whose CR is never deleted — needs this too).
+	if requeue, err := r.teardownBuildNetworkAndVMNS(ctx, vmBuild); err != nil {
+		logger.Error(err, "Network teardown failed, requeueing")
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	} else if requeue {
+		logger.Info("Network resources still present, requeueing")
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
+
+	controllerutil.RemoveFinalizer(vmBuild, finalizerName)
+	if err := r.Update(ctx, vmBuild); err != nil {
+		return ctrl.Result{}, fmt.Errorf("removing finalizer: %w", err)
+	}
+
+	logger.Info("Cleanup complete")
+	return ctrl.Result{}, nil
+}
+
+// teardownBuildNetworkAndVMNS deletes a build's network infrastructure (VPCs,
+// subnets, egress gateways) and its VirtualMachineNamespace root. Used by both
+// handleDeletion (Steps 2-3, ordered after cleanupBuildResources so KubeOVN can
+// release IPs before subnets are removed) and the Failed-build retention cleanup
+// path (which never deletes the build CR itself, so this is the only place that
+// ever tears down a Failed build's network topology — see the retention branch's
+// comment for why). Returns requeue=true when network teardown hasn't finished
+// yet (a stuck KubeOVN finalizer, a transient error) — the caller should retry
+// shortly rather than treat this as done.
+func (r *VirtualMachineBuildReconciler) teardownBuildNetworkAndVMNS(ctx context.Context, vmBuild *v1alpha1.VirtualMachineBuild) (requeue bool, err error) {
+	logger := logf.FromContext(ctx)
+	buildID := build.BuildID(vmBuild)
 
 	// Delete every KubeOVN VPC, subnet, and egress gateway for this build,
 	// discovered by the build-id label (authoritative — each is labeled at
@@ -514,9 +559,8 @@ func (r *VirtualMachineBuildReconciler) handleDeletion(ctx context.Context, vmBu
 	// the label rather than status alone means a lost or never-written status
 	// can no longer orphan the network topology, which previously left
 	// egress-gateway pods wedged in Init with NoAvailableAddress long after the
-	// build was gone. TeardownBuildNetwork deletes in dependency order and
-	// force-removes stuck finalizers, so the build's own finalizer is only
-	// removed (below) once it reports everything deleted.
+	// build was gone. TeardownNetwork deletes in dependency order and
+	// force-removes stuck finalizers.
 	if buildID != "" {
 		var statusVPCs, statusSubnets []string
 		if vmBuild.Status.Network != nil {
@@ -526,12 +570,10 @@ func (r *VirtualMachineBuildReconciler) handleDeletion(ctx context.Context, vmBu
 		sel := map[string]string{build.LabelBuildID: buildID}
 		done, err := network.TeardownNetwork(ctx, r.Client, buildID, build.BuildNS(vmBuild), sel, statusVPCs, statusSubnets)
 		if err != nil {
-			logger.Error(err, "Network teardown failed, requeueing")
-			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+			return true, err
 		}
 		if !done {
-			logger.Info("Network resources still present, requeueing")
-			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+			return true, nil
 		}
 	}
 
@@ -552,7 +594,7 @@ func (r *VirtualMachineBuildReconciler) handleDeletion(ctx context.Context, vmBu
 		}
 	}
 
-	// Step 3: Delete the VirtualMachineNamespace CR.
+	// Delete the VirtualMachineNamespace CR.
 	if buildID != "" && vmBuild.Status.VirtualMachineNamespace != "" {
 		vmns := &v1alpha1.VirtualMachineNamespace{}
 		vmns.Name = vmBuild.Status.VirtualMachineNamespace
@@ -562,13 +604,7 @@ func (r *VirtualMachineBuildReconciler) handleDeletion(ctx context.Context, vmBu
 		}
 	}
 
-	controllerutil.RemoveFinalizer(vmBuild, finalizerName)
-	if err := r.Update(ctx, vmBuild); err != nil {
-		return ctrl.Result{}, fmt.Errorf("removing finalizer: %w", err)
-	}
-
-	logger.Info("Cleanup complete")
-	return ctrl.Result{}, nil
+	return false, nil
 }
 
 // normalizeBuildRefDisks adjusts the disk list for a VM whose source is another
