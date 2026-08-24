@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 // Package guacclient implements a minimal Guacamole protocol client used by
 // the coordinator to type boot commands through the vncgateway. The gateway
 // performs the guacd handshake itself, so this client only needs to send key

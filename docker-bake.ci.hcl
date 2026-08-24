@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 // CI-only overlay: enables shared registry cache hosted on ghcr.
 // Invoked via `make push BAKE_FILES="-f docker-bake.ci.hcl"`.
 //

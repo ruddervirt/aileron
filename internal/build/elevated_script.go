@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 package build
 
 // ElevatedCredsPath is where the coordinator writes the SSH user's

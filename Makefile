@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-only
+
 IMAGE_REPO ?= ghcr.io/ruddervirt/aileron
 GIT_SHA    := $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
 GIT_DIRTY  := $(shell git diff --quiet 2>/dev/null || echo -dirty)

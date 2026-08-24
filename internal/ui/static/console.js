@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 'use strict';
 
 // Console viewer: connects guacamole-common-js to aileron-ui's /vnc reverse

@@ -3,6 +3,7 @@
 # requires-python = ">=3.11"
 # dependencies = ["pyyaml>=6.0", "ruamel.yaml>=0.18"]
 # ///
+# SPDX-License-Identifier: GPL-3.0-only
 """
 Convert OLDMODULES/<name>/metadata.yml files into Aileron VirtualMachineBuild
 manifests under converted/<name>.yaml.

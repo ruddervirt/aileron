@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 // vncgateway is the open-source aileron core for VM console viewing. It is a
 // single cluster-internal WebSocket listener that fronts guacd and an
 // in-process vncbridge: the gateway shares one guacd connection per VM among

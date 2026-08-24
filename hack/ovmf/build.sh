@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
 
 # https://www.garyhawkins.me.uk/custom-logo-on-uefi-boot-screen/
 

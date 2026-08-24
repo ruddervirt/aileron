@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 // Package ui implements aileron-ui: a basic, self-hosted web interface for
 // submitting VirtualMachineBuild / VirtualMachineClone manifests, watching
 // their status, and opening VM consoles in the browser.

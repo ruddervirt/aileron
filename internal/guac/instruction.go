@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 // Package guac implements the Guacamole protocol wire codec shared by the VNC
 // gateway (internal/vncgateway), which speaks it to both clients and guacd, and
 // the coordinator's minimal client (internal/build/guacclient). The format is

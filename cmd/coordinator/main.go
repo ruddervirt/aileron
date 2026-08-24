@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 // coordinator runs as a Job pod to handle the full post-boot lifecycle
 // of a build VM: VNC boot commands followed by SSH provisioning.
 // All blocking I/O (VNC, SSH) runs here, keeping the controller free.

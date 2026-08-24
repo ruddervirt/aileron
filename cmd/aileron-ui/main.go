@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 // aileron-ui is a basic, self-hosted web interface for the aileron operator:
 // submit VirtualMachineBuild / VirtualMachineClone manifests, watch their
 // status, and open VM consoles in the browser. See internal/ui for the

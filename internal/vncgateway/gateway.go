@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 // Package vncgateway is the open-source aileron core for VM console viewing: a
 // single cluster-internal WebSocket listener that gives browsers and the build
 // coordinator a shared, always-available view of a VM's console. It fronts

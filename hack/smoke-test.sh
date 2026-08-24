@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-only
 set -euo pipefail
 
 # smoke-test.sh — Run integration builds against a live cluster and report results.

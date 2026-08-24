@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 package build
 
 // WindowsUpdateScript is the PowerShell script uploaded to the VM to search,

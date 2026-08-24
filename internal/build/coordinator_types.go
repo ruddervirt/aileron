@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 package build
 
 // CoordinatorConfig is the JSON config written to a ConfigMap and read by the

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 variable "IMAGE_BASE" {
   default = "ghcr.io/ruddervirt/aileron"
 }

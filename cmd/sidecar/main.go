@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 // sidecar implements the KubeVirt onDefineDomain hook for aileron builds.
 // It modifies the libvirt domain XML to:
 //   - Replace OVMF firmware paths with custom EFI vars from PVC

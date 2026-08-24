@@ -1,3 +1,5 @@
+{{/* SPDX-License-Identifier: GPL-3.0-only */}}
+
 {{/*
 Expand the name of the chart.
 */}}

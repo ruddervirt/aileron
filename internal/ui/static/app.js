@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 'use strict';
 
 // aileron-ui frontend: poll the API, render builds/clones, submit manifests,
