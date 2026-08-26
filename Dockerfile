@@ -62,10 +62,10 @@ COPY --from=builder /workspace/coordinator /coordinator
 USER 65532:65532
 ENTRYPOINT ["/coordinator"]
 
-# Egress bridge helper (replaces nicolaka/netshoot)
+# Egress bridge helper
 FROM alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d AS egress-bridge
 LABEL org.opencontainers.image.source="https://github.com/ruddervirt/aileron"
-RUN apk add --no-cache iproute2 iptables
+RUN apk add --no-cache iproute2 iptables wireguard-tools
 ENTRYPOINT ["/bin/sh"]
 
 # Build helper (disk image creation, etc.)

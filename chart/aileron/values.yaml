@@ -89,6 +89,12 @@ egressExternal:
   enabled: true
   cidr: 172.17.0.0/16
   gateway: 172.17.0.1
+  # VPN egress: when enabled, ALL VM egress traffic (the egressExternal CIDR
+  # above) is routed through a WireGuard tunnel instead of the node's direct
+  # internet uplink
+  vpn:
+    enabled: false
+    secretName: ""
 
 # aileron-ui: basic self-hosted web UI for submitting builds/clones, watching
 # status, and opening VM consoles in the browser. Shipped as its own pod and

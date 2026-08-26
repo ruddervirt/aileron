@@ -39,8 +39,12 @@ spec:
               GATEWAY="{{ .Values.egressExternal.gateway }}"
               CIDR="{{ .Values.egressExternal.cidr }}"
               PREFIX="$(echo "$CIDR" | cut -d/ -f2)"
+              VPN_ENABLED="{{ .Values.egressExternal.vpn.enabled }}"
+              WG_CONF="/etc/wireguard/wg0.conf"
+              WG_TABLE=51820
+              WG_PRIORITY=100
 
-              echo "Egress bridge setup starting: bridge=$BRIDGE gateway=$GATEWAY cidr=$CIDR"
+              echo "Egress bridge setup starting: bridge=$BRIDGE gateway=$GATEWAY cidr=$CIDR vpn=$VPN_ENABLED"
               while true; do
                 if ip link show "$BRIDGE" >/dev/null 2>&1; then
                   if ! ip addr show "$BRIDGE" | grep -q "$GATEWAY"; then
@@ -50,9 +54,75 @@ spec:
 
                   echo 1 > /proc/sys/net/ipv4/ip_forward
 
-                  if ! iptables -t nat -C POSTROUTING -s "$CIDR" ! -d "$CIDR" -j MASQUERADE 2>/dev/null; then
-                    iptables -t nat -A POSTROUTING -s "$CIDR" ! -d "$CIDR" -j MASQUERADE
-                    echo "Added MASQUERADE rule for $CIDR"
+                  if [ "$VPN_ENABLED" = "true" ]; then
+                    # Fail closed: drop the direct-uplink rule first so there is
+                    # never a window where VM traffic can leak out the node's
+                    # own uplink while the tunnel is (re-)establishing.
+                    if iptables -t nat -C POSTROUTING -s "$CIDR" ! -d "$CIDR" -j MASQUERADE 2>/dev/null; then
+                      iptables -t nat -D POSTROUTING -s "$CIDR" ! -d "$CIDR" -j MASQUERADE
+                      echo "Removed direct-uplink MASQUERADE rule (VPN mode)"
+                    fi
+
+                    if [ ! -f "$WG_CONF" ]; then
+                      echo "ERROR: $WG_CONF not found (check egressExternal.vpn.secretName) - VM egress has no route"
+                      sleep 30
+                      continue
+                    fi
+
+                    if ! ip link show wg0 >/dev/null 2>&1; then
+                      if ! ip link add dev wg0 type wireguard 2>/tmp/wg-err; then
+                        echo "ERROR: failed to create wg0 (kernel WireGuard support missing?): $(cat /tmp/wg-err) - VM egress has no route"
+                        sleep 30
+                        continue
+                      fi
+                    fi
+
+                    if ! wg setconf wg0 "$WG_CONF" 2>/tmp/wg-err; then
+                      echo "ERROR: wg setconf failed: $(cat /tmp/wg-err) - VM egress has no route"
+                      sleep 30
+                      continue
+                    fi
+
+                    WG_ADDR="$(awk -F= '/^[[:space:]]*Address[[:space:]]*=/{gsub(/[[:space:]]/,"",$2); print $2; exit}' "$WG_CONF")"
+                    if [ -n "$WG_ADDR" ]; then
+                      ip addr replace "$WG_ADDR" dev wg0 2>/dev/null || true
+                    fi
+                    ip link set wg0 up
+
+                    ip route replace default dev wg0 table $WG_TABLE 2>/dev/null || true
+
+                    if ! ip rule show | grep -q "from $CIDR lookup $WG_TABLE"; then
+                      ip rule add from "$CIDR" table $WG_TABLE priority $WG_PRIORITY
+                      echo "Added policy rule: from $CIDR lookup table $WG_TABLE"
+                    fi
+
+                    if ! iptables -t nat -C POSTROUTING -s "$CIDR" -o wg0 -j MASQUERADE 2>/dev/null; then
+                      iptables -t nat -A POSTROUTING -s "$CIDR" -o wg0 -j MASQUERADE
+                      echo "Added MASQUERADE rule for $CIDR via wg0"
+                    fi
+
+                    if ! iptables -t mangle -C POSTROUTING -o wg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; then
+                      iptables -t mangle -A POSTROUTING -o wg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+                      echo "Added TCP MSS clamp on wg0"
+                    fi
+
+                    echo "wg0 handshake: $(wg show wg0 latest-handshakes 2>/dev/null || echo unknown)"
+                  else
+                    # Direct mode: tear down any VPN-mode state left over from
+                    # a prior config before restoring the plain uplink rule.
+                    if ip link show wg0 >/dev/null 2>&1; then
+                      iptables -t nat -D POSTROUTING -s "$CIDR" -o wg0 -j MASQUERADE 2>/dev/null || true
+                      iptables -t mangle -D POSTROUTING -o wg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+                      ip rule del from "$CIDR" table $WG_TABLE priority $WG_PRIORITY 2>/dev/null || true
+                      ip route flush table $WG_TABLE 2>/dev/null || true
+                      ip link del wg0 2>/dev/null || true
+                      echo "Removed VPN-mode state (direct mode)"
+                    fi
+
+                    if ! iptables -t nat -C POSTROUTING -s "$CIDR" ! -d "$CIDR" -j MASQUERADE 2>/dev/null; then
+                      iptables -t nat -A POSTROUTING -s "$CIDR" ! -d "$CIDR" -j MASQUERADE
+                      echo "Added MASQUERADE rule for $CIDR"
+                    fi
                   fi
                 else
                   echo "Waiting for $BRIDGE to appear..."
@@ -69,4 +139,16 @@ spec:
             limits:
               cpu: 50m
               memory: 32Mi
+          {{- if .Values.egressExternal.vpn.enabled }}
+          volumeMounts:
+            - name: wireguard-config
+              mountPath: /etc/wireguard
+              readOnly: true
+          {{- end }}
+      {{- if .Values.egressExternal.vpn.enabled }}
+      volumes:
+        - name: wireguard-config
+          secret:
+            secretName: {{ .Values.egressExternal.vpn.secretName | quote }}
+      {{- end }}
 {{- end }}
