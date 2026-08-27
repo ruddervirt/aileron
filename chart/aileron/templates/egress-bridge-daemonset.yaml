@@ -40,6 +40,7 @@ spec:
               CIDR="{{ .Values.egressExternal.cidr }}"
               PREFIX="$(echo "$CIDR" | cut -d/ -f2)"
               VPN_ENABLED="{{ .Values.egressExternal.vpn.enabled }}"
+              WG_SRC="/etc/wireguard-src/wg0.conf"
               WG_CONF="/etc/wireguard/wg0.conf"
               WG_TABLE=51820
               WG_PRIORITY=100
@@ -63,31 +64,31 @@ spec:
                       echo "Removed direct-uplink MASQUERADE rule (VPN mode)"
                     fi
 
-                    if [ ! -f "$WG_CONF" ]; then
-                      echo "ERROR: $WG_CONF not found (check egressExternal.vpn.secretName) - VM egress has no route"
+                    if [ ! -f "$WG_SRC" ]; then
+                      echo "ERROR: $WG_SRC not found (check egressExternal.vpn.secretName) - VM egress has no route"
                       sleep 30
                       continue
                     fi
 
-                    if ! ip link show wg0 >/dev/null 2>&1; then
-                      if ! ip link add dev wg0 type wireguard 2>/tmp/wg-err; then
-                        echo "ERROR: failed to create wg0 (kernel WireGuard support missing?): $(cat /tmp/wg-err) - VM egress has no route"
+                    # Derive the active config from the mounted wg-quick file:
+                    # force Table=off and drop DNS 
+                    grep -viE '^[[:space:]]*(Table|DNS)[[:space:]]*=' "$WG_SRC" \
+                      | sed '/^\[Interface\]/a Table = off' > "$WG_CONF"
+
+                    if ip link show wg0 >/dev/null 2>&1; then
+                      # Already up: reconcile keys/peer/endpoint in place via
+                      # wg-quick's own "strip" (the native wg-quick -> wg(8)
+                      # config translator) without bouncing the interface.
+                      if ! wg-quick strip "$WG_CONF" 2>/tmp/wg-err | wg syncconf wg0 /dev/stdin 2>>/tmp/wg-err; then
+                        echo "ERROR: wg syncconf failed: $(cat /tmp/wg-err) - VM egress may be using a stale config"
+                      fi
+                    else
+                      if ! wg-quick up wg0 2>/tmp/wg-err; then
+                        echo "ERROR: wg-quick up failed (kernel WireGuard support missing?): $(cat /tmp/wg-err) - VM egress has no route"
                         sleep 30
                         continue
                       fi
                     fi
-
-                    if ! wg setconf wg0 "$WG_CONF" 2>/tmp/wg-err; then
-                      echo "ERROR: wg setconf failed: $(cat /tmp/wg-err) - VM egress has no route"
-                      sleep 30
-                      continue
-                    fi
-
-                    WG_ADDR="$(awk -F= '/^[[:space:]]*Address[[:space:]]*=/{gsub(/[[:space:]]/,"",$2); print $2; exit}' "$WG_CONF")"
-                    if [ -n "$WG_ADDR" ]; then
-                      ip addr replace "$WG_ADDR" dev wg0 2>/dev/null || true
-                    fi
-                    ip link set wg0 up
 
                     ip route replace default dev wg0 table $WG_TABLE 2>/dev/null || true
 
@@ -142,7 +143,7 @@ spec:
           {{- if .Values.egressExternal.vpn.enabled }}
           volumeMounts:
             - name: wireguard-config
-              mountPath: /etc/wireguard
+              mountPath: /etc/wireguard-src
               readOnly: true
           {{- end }}
       {{- if .Values.egressExternal.vpn.enabled }}
