@@ -7,38 +7,47 @@
 <title>aileron-ui</title>
 <link rel="stylesheet" href="/style.css">
 </head>
-<body>
+<body hx-ext="morph,response-targets">
 <header>
   <h1>aileron-ui</h1>
   <span class="sub">VM builds, clones &amp; consoles</span>
-  <span id="err" class="err"></span>
 </header>
 
 <main>
   <section class="panel">
     <h2>Builds</h2>
-    <div id="builds" class="list">loading&hellip;</div>
+    <div id="builds" class="list"
+         hx-get="/ui/builds" hx-trigger="load, every 4s"
+         hx-target="this" hx-swap="morph:innerHTML" hx-target-error="this">loading&hellip;</div>
     <details class="new">
       <summary>New build</summary>
-      <textarea id="build-yaml" spellcheck="false"></textarea>
-      <button id="build-submit">Submit build</button>
+      <form hx-post="/ui/builds" hx-target="#builds" hx-swap="morph:innerHTML" hx-target-error="#build-status">
+        <textarea name="manifest" id="build-yaml" spellcheck="false"></textarea>
+        <button type="submit">Submit build</button>
+      </form>
       <div id="build-status" class="form-status"></div>
     </details>
   </section>
 
   <section class="panel">
     <h2>Clones</h2>
-    <p class="hint">Clone a succeeded build with its <strong>clone</strong> button.</p>
-    <div id="clones" class="list">loading&hellip;</div>
+    <p class="hint">Clone a succeeded build with its <strong>clone</strong> action.</p>
+    <div id="clones" class="list"
+         hx-get="/ui/clones" hx-trigger="load, every 4s"
+         hx-target="this" hx-swap="morph:innerHTML" hx-target-error="this">loading&hellip;</div>
   </section>
 
   <section class="panel">
     <h2>Grades</h2>
-    <div id="grades" class="list">loading&hellip;</div>
+    <div id="grades" class="list"
+         hx-get="/ui/grades" hx-trigger="load, every 4s"
+         hx-target="this" hx-swap="morph:innerHTML" hx-target-error="this">loading&hellip;</div>
     <details class="new">
       <summary>New grade</summary>
-      <textarea id="grade-yaml" spellcheck="false"></textarea>
-      <button id="grade-submit">Submit grade</button>
+      <form hx-post="/ui/grades" hx-target="#grades" hx-swap="morph:innerHTML" hx-target-error="#grade-status">
+        <textarea name="manifest" id="grade-yaml" spellcheck="false"></textarea>
+        <button type="submit">Submit grade</button>
+      </form>
       <div id="grade-status" class="form-status"></div>
     </details>
   </section>
@@ -46,7 +55,7 @@
 
 <script>
 // Sample manifests pre-filled into the submission textareas.
-window.SAMPLE_BUILD = `apiVersion: ruddervirt.io/v1alpha1
+document.getElementById('build-yaml').value = `apiVersion: ruddervirt.io/v1alpha1
 kind: VirtualMachineBuild
 metadata:
   name: test-simple
@@ -73,7 +82,7 @@ spec:
   timeout: 60m
 `;
 
-window.SAMPLE_GRADE = `apiVersion: ruddervirt.io/v1alpha1
+document.getElementById('grade-yaml').value = `apiVersion: ruddervirt.io/v1alpha1
 kind: GradeRequest
 metadata:
   name: grade-sample
@@ -89,6 +98,8 @@ spec:
         - uname -a
 `;
 </script>
-<script src="/app.js"></script>
+<script src="/htmx.min.js"></script>
+<script src="/idiomorph-ext.min.js"></script>
+<script src="/response-targets.min.js"></script>
 </body>
 </html>

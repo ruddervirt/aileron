@@ -33,7 +33,6 @@ header {
 }
 header h1 { margin: 0; font-size: 18px; }
 header .sub { color: var(--muted); }
-header .err { margin-left: auto; color: var(--fail); }
 
 main {
   display: grid;
@@ -74,7 +73,7 @@ main {
 .badge.warn { background: var(--warn); color: #2a2008; }
 .badge.fail { background: var(--fail); color: #2a0c0e; }
 
-button {
+button, .actions a {
   font-family: inherit;
   font-size: 12px;
   cursor: pointer;
@@ -83,11 +82,13 @@ button {
   color: var(--fg);
   border-radius: 4px;
   padding: 3px 9px;
+  text-decoration: none;
+  display: inline-block;
 }
-button:hover { border-color: var(--accent); }
+button:hover, .actions a:hover { border-color: var(--accent); }
 button.danger { color: var(--fail); }
-button.console { color: var(--accent); }
-button.clone { color: var(--ok); }
+.console { color: var(--accent); }
+.clone { color: var(--ok); }
 
 .empty { color: var(--muted); font-style: italic; }
 .hint { color: var(--muted); margin: 0 0 10px; }
@@ -101,7 +102,7 @@ details.provs summary { cursor: pointer; color: var(--accent); }
 }
 .prov-row { display: flex; align-items: center; gap: 8px; margin: 2px 0; padding-left: 6px; }
 .prov-msg { padding-left: 6px; }
-button.logs { color: var(--accent); margin-left: auto; }
+.logs { color: var(--accent); margin-left: auto; }
 
 details.new { margin-top: 12px; }
 details.new summary { cursor: pointer; color: var(--accent); }
@@ -120,6 +121,22 @@ textarea {
 }
 details.new button { margin-top: 8px; }
 .form-status { margin-top: 8px; word-break: break-word; }
-.form-status.ok { color: var(--ok); }
-.form-status.fail { color: var(--fail); }
+.form-status .ok { color: var(--ok); }
+.form-status .fail { color: var(--fail); }
 .time { color: var(--muted); font-size: 11px; margin-left: auto; }
+
+details.new-clone { margin-top: 8px; }
+details.new-clone summary.clone { cursor: pointer; }
+details.new-clone form {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  margin-top: 6px;
+}
+details.new-clone input[type="text"] {
+  background: #1a1a1a;
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 6px;
+  font-family: inherit;
+  font-size: 12px;
+}

@@ -11,6 +11,7 @@
 package ui
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -86,6 +87,20 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/grades", s.createGrade)
 	mux.HandleFunc("GET /api/grades/{name}", s.getGrade)
 	mux.HandleFunc("DELETE /api/grades/{name}", s.deleteGrade)
+
+	// /ui/* mirrors /api/* but renders server-side HTML fragments (for the
+	// htmx frontend) instead of JSON. See ui_handlers.go.
+	mux.HandleFunc("GET /ui/builds", s.uiListBuilds)
+	mux.HandleFunc("POST /ui/builds", s.uiCreateBuild)
+	mux.HandleFunc("DELETE /ui/builds/{name}", s.uiDeleteBuild)
+
+	mux.HandleFunc("GET /ui/clones", s.uiListClones)
+	mux.HandleFunc("POST /ui/clones", s.uiCreateClone)
+	mux.HandleFunc("DELETE /ui/clones/{name}", s.uiDeleteClone)
+
+	mux.HandleFunc("GET /ui/grades", s.uiListGrades)
+	mux.HandleFunc("POST /ui/grades", s.uiCreateGrade)
+	mux.HandleFunc("DELETE /ui/grades/{name}", s.uiDeleteGrade)
 
 	mux.HandleFunc("GET /vnc/{namespace}/{vmi}", s.proxyVNC)
 
@@ -275,15 +290,25 @@ func projectClone(c *v1alpha1.VirtualMachineClone) cloneView {
 
 // --- build handlers ------------------------------------------------------
 
-func (s *Server) listBuilds(w http.ResponseWriter, r *http.Request) {
+// fetchBuilds lists and projects all builds in the server's namespace,
+// shared by the JSON (/api) and HTML (/ui) list handlers.
+func (s *Server) fetchBuilds(ctx context.Context) ([]buildView, error) {
 	var list v1alpha1.VirtualMachineBuildList
-	if err := s.client.List(r.Context(), &list, client.InNamespace(s.namespace)); err != nil {
-		s.httpError(w, http.StatusInternalServerError, "listing builds", err)
-		return
+	if err := s.client.List(ctx, &list, client.InNamespace(s.namespace)); err != nil {
+		return nil, err
 	}
 	views := make([]buildView, 0, len(list.Items))
 	for i := range list.Items {
 		views = append(views, projectBuild(&list.Items[i]))
+	}
+	return views, nil
+}
+
+func (s *Server) listBuilds(w http.ResponseWriter, r *http.Request) {
+	views, err := s.fetchBuilds(r.Context())
+	if err != nil {
+		s.httpError(w, http.StatusInternalServerError, "listing builds", err)
+		return
 	}
 	writeJSON(w, http.StatusOK, views)
 }
@@ -402,15 +427,25 @@ func (s *Server) buildLogs(w http.ResponseWriter, r *http.Request) {
 
 // --- clone handlers ------------------------------------------------------
 
-func (s *Server) listClones(w http.ResponseWriter, r *http.Request) {
+// fetchClones lists and projects all clones in the server's namespace,
+// shared by the JSON (/api) and HTML (/ui) list handlers.
+func (s *Server) fetchClones(ctx context.Context) ([]cloneView, error) {
 	var list v1alpha1.VirtualMachineCloneList
-	if err := s.client.List(r.Context(), &list, client.InNamespace(s.namespace)); err != nil {
-		s.httpError(w, http.StatusInternalServerError, "listing clones", err)
-		return
+	if err := s.client.List(ctx, &list, client.InNamespace(s.namespace)); err != nil {
+		return nil, err
 	}
 	views := make([]cloneView, 0, len(list.Items))
 	for i := range list.Items {
 		views = append(views, projectClone(&list.Items[i]))
+	}
+	return views, nil
+}
+
+func (s *Server) listClones(w http.ResponseWriter, r *http.Request) {
+	views, err := s.fetchClones(r.Context())
+	if err != nil {
+		s.httpError(w, http.StatusInternalServerError, "listing clones", err)
+		return
 	}
 	writeJSON(w, http.StatusOK, views)
 }
@@ -451,15 +486,25 @@ func (s *Server) deleteClone(w http.ResponseWriter, r *http.Request) {
 
 // --- grade handlers ------------------------------------------------------
 
-func (s *Server) listGrades(w http.ResponseWriter, r *http.Request) {
+// fetchGrades lists and projects all grades in the server's namespace,
+// shared by the JSON (/api) and HTML (/ui) list handlers.
+func (s *Server) fetchGrades(ctx context.Context) ([]gradeView, error) {
 	var list v1alpha1.GradeRequestList
-	if err := s.client.List(r.Context(), &list, client.InNamespace(s.namespace)); err != nil {
-		s.httpError(w, http.StatusInternalServerError, "listing grades", err)
-		return
+	if err := s.client.List(ctx, &list, client.InNamespace(s.namespace)); err != nil {
+		return nil, err
 	}
 	views := make([]gradeView, 0, len(list.Items))
 	for i := range list.Items {
 		views = append(views, projectGrade(&list.Items[i]))
+	}
+	return views, nil
+}
+
+func (s *Server) listGrades(w http.ResponseWriter, r *http.Request) {
+	views, err := s.fetchGrades(r.Context())
+	if err != nil {
+		s.httpError(w, http.StatusInternalServerError, "listing grades", err)
+		return
 	}
 	writeJSON(w, http.StatusOK, views)
 }
@@ -529,14 +574,12 @@ func (s *Server) getError(w http.ResponseWriter, err error, kind string) {
 }
 
 func (s *Server) createError(w http.ResponseWriter, err error, kind string) {
-	switch {
-	case apierrors.IsAlreadyExists(err):
-		s.httpError(w, http.StatusConflict, kind+" already exists", nil)
-	case apierrors.IsBadRequest(err) || apierrors.IsInvalid(err):
-		s.httpError(w, http.StatusUnprocessableEntity, "invalid "+kind+" manifest", err)
-	default:
-		s.httpError(w, http.StatusInternalServerError, "creating "+kind, err)
+	status, msg := classifyCreateErr(err, kind)
+	if status == http.StatusConflict {
+		s.httpError(w, status, msg, nil)
+		return
 	}
+	s.httpError(w, status, msg, err)
 }
 
 func (s *Server) httpError(w http.ResponseWriter, code int, msg string, err error) {

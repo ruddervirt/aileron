@@ -1,0 +1,106 @@
+{{/* SPDX-License-Identifier: GPL-3.0-only */}}
+
+{{/* Shared small fragments used across panels. */}}
+{{define "status-oob"}}<div id="{{.ID}}" class="form-status" hx-swap-oob="true"><span class="ok">{{.Msg}}</span></div>{{end}}
+
+{{define "error-message"}}<span class="fail">{{.}}</span>{{end}}
+
+{{/* --- builds --- */}}
+
+{{define "builds-panel"}}{{if .}}{{range .}}{{template "build-item" .}}{{end}}{{else}}<div class="empty">none</div>{{end}}{{end}}
+
+{{define "build-item"}}
+<div class="item" id="build-{{.Name}}">
+  <div class="head">
+    <span class="name">{{.Name}}</span>
+    <span class="badge {{badgeClass .Phase}}">{{if .Phase}}{{.Phase}}{{else}}Unknown{{end}}</span>
+    <span class="time">{{displayTime .CompletionTime .StartTime}}</span>
+  </div>
+  {{if .Message}}<div class="msg">{{.Message}}</div>{{end}}
+  {{template "provisioners" .}}
+  <div class="actions">
+    {{range .Consoles}}<a class="console" href="{{consoleHref .}}" target="_blank" rel="noopener">console: {{.VMName}}</a>{{end}}
+    {{if eq .Phase "Succeeded"}}{{template "clone-form" .}}{{end}}
+    <button class="danger" hx-delete="/ui/builds/{{.Name}}" hx-target="#builds" hx-swap="morph:innerHTML" hx-confirm="Delete build &quot;{{.Name}}&quot;?">delete</button>
+  </div>
+</div>
+{{end}}
+
+{{define "provisioners"}}{{if .VMs}}
+<details class="provs" id="provs-{{.Name}}">
+  <summary>provisioners</summary>
+  {{$build := .}}
+  {{range .VMs}}
+  <div class="prov-vm">
+    <span class="name">{{.Name}}</span>
+    <span class="badge {{badgeClass .Phase}}">{{if .Phase}}{{.Phase}}{{else}}?{{end}}</span>
+    <a class="logs" href="/api/builds/{{$build.Name}}/logs?vm={{.Name}}" target="_blank" rel="noopener">logs: {{.Name}}</a>
+  </div>
+  {{if .Provisioners}}{{range .Provisioners}}
+  <div class="prov-row">
+    <span class="badge {{badgeClass .Status}}">{{if .Status}}{{.Status}}{{else}}?{{end}}</span>
+    <span>{{if .Name}}{{.Name}}{{else}}#{{.Index}}{{end}} ({{.Type}})</span>
+    {{if .Duration}}<span class="time">{{.Duration}}</span>{{end}}
+  </div>
+  {{if .Message}}<div class="msg prov-msg">{{.Message}}</div>{{end}}
+  {{end}}{{else}}
+  <div class="empty">no provisioner results yet</div>
+  {{end}}
+  {{end}}
+</details>
+{{end}}{{end}}
+
+{{define "clone-form"}}
+<details class="new-clone">
+  <summary class="clone">clone</summary>
+  <form hx-post="/ui/clones" hx-target="#clones" hx-swap="morph:innerHTML" hx-target-error="#clone-status-{{.Name}}">
+    <input type="hidden" name="templateName" value="{{.Name}}">
+    <input type="text" name="name" value="{{.Name}}-clone" required>
+    <button type="submit">create clone</button>
+  </form>
+  <div id="clone-status-{{.Name}}" class="form-status"></div>
+</details>
+{{end}}
+
+{{/* --- clones --- */}}
+
+{{define "clones-panel"}}{{if .}}{{range .}}{{template "clone-item" .}}{{end}}{{else}}<div class="empty">none</div>{{end}}{{end}}
+
+{{define "clone-item"}}
+<div class="item" id="clone-{{.Name}}">
+  <div class="head">
+    <span class="name">{{.Name}}</span>
+    <span class="badge {{badgeClass .Phase}}">{{if .Phase}}{{.Phase}}{{else}}Unknown{{end}}</span>
+    <span class="time">{{displayTime .CompletionTime .StartTime}}</span>
+  </div>
+  {{if .TemplateName}}<div class="msg">template: {{.TemplateName}}</div>{{end}}
+  {{if .Message}}<div class="msg">{{.Message}}</div>{{end}}
+  <div class="actions">
+    {{range .Consoles}}<a class="console" href="{{consoleHref .}}" target="_blank" rel="noopener">console: {{.VMName}}</a>{{end}}
+    <button class="danger" hx-delete="/ui/clones/{{.Name}}" hx-target="#clones" hx-swap="morph:innerHTML" hx-confirm="Delete clone &quot;{{.Name}}&quot;?">delete</button>
+  </div>
+</div>
+{{end}}
+
+{{/* --- grades --- */}}
+
+{{define "grades-panel"}}{{if .}}{{range .}}{{template "grade-item" .}}{{end}}{{else}}<div class="empty">none</div>{{end}}{{end}}
+
+{{define "grade-item"}}
+<div class="item" id="grade-{{.Name}}">
+  <div class="head">
+    <span class="name">{{.Name}}</span>
+    <span class="badge {{badgeClass .Phase}}">{{if .Phase}}{{.Phase}}{{else}}Unknown{{end}}</span>
+    <span class="time">{{displayTime .CompletedAt .StartedAt}}</span>
+  </div>
+  {{if .TargetNamespace}}<div class="msg">target ns: {{.TargetNamespace}}</div>{{end}}
+  {{if .Message}}<div class="msg">{{.Message}}</div>{{end}}
+  {{if .MaxSlots}}<div class="msg">slots: {{.ActiveSlots}}/{{.MaxSlots}}{{if .QueuedCount}} ({{.QueuedCount}} queued){{end}}</div>{{end}}
+  {{range .VMs}}
+  <div class="msg">{{.Name}}: {{if .Phase}}{{.Phase}}{{else}}?{{end}}{{if .QueuePosition}} - queued #{{deref .QueuePosition}}{{else if .Message}} - {{.Message}}{{end}}</div>
+  {{end}}
+  <div class="actions">
+    <button class="danger" hx-delete="/ui/grades/{{.Name}}" hx-target="#grades" hx-swap="morph:innerHTML" hx-confirm="Delete grade &quot;{{.Name}}&quot;?">delete</button>
+  </div>
+</div>
+{{end}}
