@@ -269,6 +269,67 @@ func (s *SourceImporter) ensureCacheDV(ctx context.Context, vmSpec *v1alpha1.Bui
 	return false, nil
 }
 
+// DefaultSourceCacheTTL is how long an unused — or never-completed — cached
+// boot-disk source DataVolume may sit idle before CleanupExpiredSourceCaches
+// reaps it. Mirrors DefaultISOCacheTTL.
+const DefaultSourceCacheTTL = 24 * time.Hour
+
+// CleanupExpiredSourceCaches deletes cached boot-disk source DataVolumes
+// (ruddervirt.io/source-cache) that haven't been used within the TTL. Mirrors
+// ISOImporter.CleanupExpiredISOs: CDI holds a dead-URL or otherwise
+// unreachable source import in a non-terminal phase forever — crashlooping
+// the importer-prime pod rather than ever transitioning to Failed — so a
+// completed-phase-only gate would leak the cache DV, its prime PVC, and the
+// importer pod indefinitely. ensureCacheDV's cacheImportError check only
+// fails the build waiting on the cache; it never touches the DV itself.
+func (s *SourceImporter) CleanupExpiredSourceCaches(ctx context.Context, namespace string, ttl time.Duration) error {
+	logger := logf.FromContext(ctx)
+	list := &unstructured.UnstructuredList{}
+	list.SetGroupVersionKind(schema.GroupVersionKind{
+		Group: "cdi.kubevirt.io", Version: "v1beta1", Kind: "DataVolumeList",
+	})
+
+	if err := s.Client.List(ctx, list,
+		client.InNamespace(namespace),
+		client.MatchingLabels{"ruddervirt.io/source-cache": "true"},
+	); err != nil {
+		return fmt.Errorf("listing cached sources: %w", err)
+	}
+
+	for i := range list.Items {
+		dv := &list.Items[i]
+		annotations := dv.GetAnnotations()
+		lastUsedStr := annotations["ruddervirt.io/source-last-used"]
+		if lastUsedStr == "" {
+			continue
+		}
+		lastUsed, err := time.Parse(time.RFC3339, lastUsedStr)
+		if err != nil {
+			continue
+		}
+		if time.Since(lastUsed) <= ttl {
+			continue
+		}
+		phase, _, _ := unstructured.NestedString(dv.Object, "status", "phase")
+		// Reap completed imports past their TTL — and STALLED ones, same as the
+		// ISO cache sweep. last-used is only refreshed on Succeeded, so for a
+		// never-completed DV "expired" means it has been stuck for the whole
+		// TTL. An actively-progressing import (Running=True) is never reaped.
+		stalled := phase != PhaseSucceeded && phase != PhaseFailed && importStalled(dv)
+		if phase != PhaseSucceeded && phase != PhaseFailed && !stalled {
+			continue
+		}
+		if stalled {
+			logger.Info("Reaping stalled source cache import", "dv", dv.GetName(), "phase", phase)
+		}
+		if err := s.Client.Delete(ctx, dv); err != nil && !errors.IsNotFound(err) {
+			return fmt.Errorf("deleting expired source cache %s: %w", dv.GetName(), err)
+		}
+	}
+
+	return nil
+}
+
 // resolvedSource holds the resolved source for DataVolume creation.
 // A buildRef is resolved into the equivalent of a sourcePVC.
 type resolvedSource struct {

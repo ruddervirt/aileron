@@ -9,6 +9,7 @@ import (
 
 	v1alpha1 "github.com/ruddervirt/aileron/api/v1alpha1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -97,5 +98,88 @@ func TestSourceImporter_EnsureCacheDV_StillWaitingWithinGracePeriod(t *testing.T
 	}
 	if ready {
 		t.Error("ensureCacheDV: ready = true, want false (still importing)")
+	}
+}
+
+// sourceCacheCleanupDV builds a ruddervirt.io/source-cache DataVolume with a
+// last-used annotation, mirroring iso_test.go's cacheDV for
+// CleanupExpiredSourceCaches.
+func sourceCacheCleanupDV(name string, lastUsed time.Time, phase string, runningCond []string) *unstructured.Unstructured {
+	dv := &unstructured.Unstructured{}
+	dv.SetGroupVersionKind(dvGVK)
+	dv.SetName(name)
+	dv.SetNamespace("op-ns")
+	dv.SetLabels(map[string]string{"ruddervirt.io/source-cache": "true"})
+	dv.SetAnnotations(map[string]string{
+		"ruddervirt.io/source-last-used": lastUsed.UTC().Format(time.RFC3339),
+	})
+	status := map[string]any{"phase": phase}
+	if runningCond != nil {
+		status["conditions"] = []any{
+			map[string]any{"type": "Running", "status": runningCond[0], "reason": runningCond[1]},
+		}
+	}
+	dv.Object["status"] = status
+	return dv
+}
+
+// TestCleanupExpiredSourceCaches is the SourceImporter twin of
+// iso_test.go's TestCleanupExpiredISOs: a boot-disk source cache DV whose
+// dead source URL keeps CDI crashlooping the importer-prime pod forever
+// (never Succeeded, never Failed) must still get reaped once stalled past
+// the TTL — see CleanupExpiredSourceCaches.
+func TestCleanupExpiredSourceCaches(t *testing.T) {
+	expired := time.Now().Add(-48 * time.Hour)
+	fresh := time.Now().Add(-1 * time.Hour)
+
+	tests := []struct {
+		name    string
+		dv      *unstructured.Unstructured
+		deleted bool
+	}{
+		{
+			name:    "expired succeeded import → reaped",
+			dv:      sourceCacheCleanupDV("src-a", expired, PhaseSucceeded, nil),
+			deleted: true,
+		},
+		{
+			name:    "expired failed import → reaped",
+			dv:      sourceCacheCleanupDV("src-b", expired, PhaseFailed, nil),
+			deleted: true,
+		},
+		{
+			name:    "expired stalled import (Running=False/Error) → reaped",
+			dv:      sourceCacheCleanupDV("src-c", expired, "ImportInProgress", []string{"False", "Error"}),
+			deleted: true,
+		},
+		{
+			name:    "expired but actively downloading (Running=True) → kept",
+			dv:      sourceCacheCleanupDV("src-d", expired, "ImportInProgress", []string{"True", "Pod is running"}),
+			deleted: false,
+		},
+		{
+			name:    "fresh stalled import → kept until TTL",
+			dv:      sourceCacheCleanupDV("src-e", fresh, "ImportInProgress", []string{"False", "Error"}),
+			deleted: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cl := fake.NewClientBuilder().WithScheme(isoScheme(t)).WithObjects(tc.dv).Build()
+			s := &SourceImporter{Client: cl, OperatorNS: "op-ns"}
+
+			if err := s.CleanupExpiredSourceCaches(context.Background(), "op-ns", 24*time.Hour); err != nil {
+				t.Fatalf("CleanupExpiredSourceCaches: %v", err)
+			}
+
+			got := &unstructured.Unstructured{}
+			got.SetGroupVersionKind(dvGVK)
+			err := cl.Get(context.Background(), types.NamespacedName{Name: tc.dv.GetName(), Namespace: "op-ns"}, got)
+			gone := err != nil
+			if gone != tc.deleted {
+				t.Errorf("DV deleted = %v, want %v (get err: %v)", gone, tc.deleted, err)
+			}
+		})
 	}
 }

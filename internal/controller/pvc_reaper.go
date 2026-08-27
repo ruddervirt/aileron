@@ -210,6 +210,14 @@ func (r *PVCReaper) sweep(ctx context.Context) error {
 		logger.Error(err, "ISO cache sweep failed")
 	}
 
+	// Same backstop for cached boot-disk sources (ruddervirt.io/source-cache):
+	// a dead-URL/unreachable source cache DV crashloops its importer-prime pod
+	// forever otherwise — see CleanupExpiredSourceCaches.
+	sourceImporter := &build.SourceImporter{Client: r.Client, OperatorNS: ns}
+	if err := sourceImporter.CleanupExpiredSourceCaches(ctx, ns, build.DefaultSourceCacheTTL); err != nil {
+		logger.Error(err, "source cache sweep failed")
+	}
+
 	// Clean up orphaned clone VirtualMachineNamespace roots, but only once no clone
 	// PVCs remain for that ID (so deleting the VMNS never cascade-deletes an owned
 	// PVC that survived above).
