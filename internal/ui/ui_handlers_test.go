@@ -3,16 +3,36 @@
 package ui
 
 import (
+	"context"
+	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	kubefake "k8s.io/client-go/kubernetes/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	ctrlfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	v1alpha1 "github.com/ruddervirt/aileron/api/v1alpha1"
 )
+
+// newTestServerAndClient is like newTestServer but also returns the
+// underlying fake client, for tests that need to inspect state a handler
+// mutated (e.g. a power-control action's effect on a VirtualMachine).
+func newTestServerAndClient(t *testing.T, objs ...client.Object) (*httptest.Server, client.Client) {
+	t.Helper()
+	c := ctrlfake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
+	srv := NewServer(c, kubefake.NewClientset(), "ruddervirt-system", "ws://gw:7778",
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return httptest.NewServer(srv.Handler()), c
+}
 
 // TestUIBuildsFragmentHasStableIDs checks the /ui/builds fragment carries the
 // stable per-build and per-provisioners-section ids the frontend relies on
@@ -34,7 +54,7 @@ func TestUIBuildsFragmentHasStableIDs(t *testing.T) {
 			}},
 		},
 	}
-	ts := newTestServer(t, build)
+	ts := newTestServer(t, build, runningVMI("vm-abc123", "vm-abc123-builder"))
 	defer ts.Close()
 
 	resp, err := http.Get(ts.URL + "/ui/builds")
@@ -274,4 +294,157 @@ func TestUIGradesFragmentRendersQueuePosition(t *testing.T) {
 	if strings.Contains(string(body), "0x") {
 		t.Errorf("body = %q, contains a raw pointer address instead of a dereferenced value", body)
 	}
+}
+
+// TestUIBuildsFragmentHidesConsoleWhenNotRunning checks that a build's
+// console link is omitted when its VM has no running VirtualMachineInstance
+// (e.g. the VM hasn't booted yet, or was stopped) — a console link to a
+// stopped VM has nothing to connect to.
+func TestUIBuildsFragmentHidesConsoleWhenNotRunning(t *testing.T) {
+	build := &v1alpha1.VirtualMachineBuild{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-simple", Namespace: "ruddervirt-system"},
+		Status: v1alpha1.VirtualMachineBuildStatus{
+			Phase:          "Building",
+			BuildID:        "vm-abc123",
+			BuildNamespace: "vm-abc123",
+			VMStatuses:     []v1alpha1.VMBuildStatus{{Name: "builder", VMName: "vm-abc123-builder"}},
+		},
+	}
+	ts := newTestServer(t, build) // no VirtualMachineInstance fixture: not running
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/ui/builds")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+	if strings.Contains(string(body), "console:") {
+		t.Errorf("body = %q, want no console link for a non-running VM", body)
+	}
+}
+
+// TestUIClonesPanelShowsPowerControls checks the clones panel renders a
+// console link + stop button for a running clone VM, and a start button (no
+// console link) for a stopped one.
+func TestUIClonesPanelShowsPowerControls(t *testing.T) {
+	clone := &v1alpha1.VirtualMachineClone{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-clone", Namespace: "ruddervirt-system"},
+		Spec:       v1alpha1.VirtualMachineCloneSpec{TemplateName: "module"},
+		Status: v1alpha1.VirtualMachineCloneStatus{
+			Phase:          "Ready",
+			CloneNamespace: "ns-abc123",
+			VMStatuses: []v1alpha1.ClonedVMStatus{
+				{Name: "run-vm", Ready: true},
+				{Name: "stop-vm", Ready: true},
+			},
+		},
+	}
+	ts := newTestServer(t, clone, runningVMI("ns-abc123", "run-vm"))
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/ui/clones")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+	html := string(body)
+
+	for _, want := range []string{
+		`href="/console.html?ns=ns-abc123&amp;vmi=run-vm&amp;name=run-vm"`,
+		`hx-post="/ui/clones/test-clone/vms/run-vm/stop?page=1"`,
+		`hx-post="/ui/clones/test-clone/vms/stop-vm/start?page=1"`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("fragment missing %q\nfull body:\n%s", want, html)
+		}
+	}
+	if strings.Contains(html, "vmi=stop-vm") {
+		t.Errorf("fragment has a console link for the stopped VM: %s", html)
+	}
+}
+
+// TestUIStartCloneVM checks the start action patches the target VM's
+// spec.runStrategy to Always.
+func TestUIStartCloneVM(t *testing.T) {
+	clone := &v1alpha1.VirtualMachineClone{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-clone", Namespace: "ruddervirt-system"},
+		Status:     v1alpha1.VirtualMachineCloneStatus{CloneNamespace: "ns-abc123"},
+	}
+	ts, c := newTestServerAndClient(t, clone, stoppedVM("ns-abc123", "run-vm"))
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/ui/clones/test-clone/vms/run-vm/start", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, body)
+	}
+
+	var vm unstructured.Unstructured
+	vm.SetGroupVersionKind(schema.GroupVersionKind{Group: "kubevirt.io", Version: "v1", Kind: "VirtualMachine"})
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "ns-abc123", Name: "run-vm"}, &vm); err != nil {
+		t.Fatal(err)
+	}
+	strategy, _, _ := unstructured.NestedString(vm.Object, "spec", "runStrategy")
+	if strategy != "Always" {
+		t.Errorf("runStrategy = %q, want Always", strategy)
+	}
+}
+
+// TestUIBuildsSortedAndPaginated checks builds are listed newest-first and
+// split across pages of uiPageSize.
+func TestUIBuildsSortedAndPaginated(t *testing.T) {
+	objs := make([]client.Object, 0, uiPageSize+2)
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := 1; i <= uiPageSize+2; i++ {
+		objs = append(objs, &v1alpha1.VirtualMachineBuild{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              fmtBuildName(i),
+				Namespace:         "ruddervirt-system",
+				CreationTimestamp: metav1.NewTime(base.Add(time.Duration(i) * time.Minute)),
+			},
+		})
+	}
+	ts := newTestServer(t, objs...)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/ui/builds")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+	html := string(body)
+
+	// Newest (highest i, latest timestamp) first.
+	newest := strings.Index(html, `id="build-`+fmtBuildName(uiPageSize+2)+`"`)
+	oldestOnPage := strings.Index(html, `id="build-`+fmtBuildName(3)+`"`)
+	if newest == -1 || oldestOnPage == -1 || newest > oldestOnPage {
+		t.Fatalf("expected newest build before oldest-shown build in page 1; body:\n%s", html)
+	}
+	if strings.Contains(html, `id="build-`+fmtBuildName(1)+`"`) {
+		t.Errorf("page 1 should not contain the oldest build (past uiPageSize): %s", html)
+	}
+	if !strings.Contains(html, "page 1 / 2") {
+		t.Errorf("missing pager text 'page 1 / 2': %s", html)
+	}
+
+	resp2, err := http.Get(ts.URL + "/ui/builds?page=2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp2.Body.Close() }()
+	body2, _ := io.ReadAll(resp2.Body)
+	if !strings.Contains(string(body2), `id="build-`+fmtBuildName(1)+`"`) {
+		t.Errorf("page 2 should contain the oldest build: %s", body2)
+	}
+}
+
+func fmtBuildName(i int) string {
+	return fmt.Sprintf("build-%02d", i)
 }

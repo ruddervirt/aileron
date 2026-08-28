@@ -3,16 +3,131 @@
 package ui
 
 import (
+	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
 
 	v1alpha1 "github.com/ruddervirt/aileron/api/v1alpha1"
 )
+
+// uiPageSize is the number of items shown per page in the builds/clones
+// panels.
+const uiPageSize = 10
+
+// pageParam reads the "page" parameter (query string for GET, form body for
+// POST/PUT/PATCH) and clamps it to >= 1. DELETE requests carry it in the URL
+// query string instead (see the hx-delete URLs in fragments.html.tmpl),
+// since net/http's form parsing does not read DELETE bodies.
+func pageParam(r *http.Request) int {
+	raw := r.URL.Query().Get("page")
+	if raw == "" {
+		raw = r.FormValue("page")
+	}
+	p, err := strconv.Atoi(raw)
+	if err != nil || p < 1 {
+		return 1
+	}
+	return p
+}
+
+// buildsPanelView is the data passed to the builds-panel template: one page
+// of items plus pagination info.
+type buildsPanelView struct {
+	Items      []buildItemView
+	Page       int
+	TotalPages int
+}
+
+// buildItemView is a build carrying the page it was rendered on, so its
+// delete button's URL can round-trip back to the same page.
+type buildItemView struct {
+	buildView
+	Page int
+}
+
+// paginateBuilds pages views and, only for the items on the returned page,
+// filters each build's consoles down to VMs that are actually running (a
+// console link to a stopped VM has nothing to connect to).
+func (s *Server) paginateBuilds(ctx context.Context, views []buildView, page int) buildsPanelView {
+	pageViews, page, total := paginate(views, page)
+	items := make([]buildItemView, 0, len(pageViews))
+	for _, v := range pageViews {
+		v.Consoles = s.runningConsoles(ctx, v.Consoles)
+		items = append(items, buildItemView{buildView: v, Page: page})
+	}
+	return buildsPanelView{Items: items, Page: page, TotalPages: total}
+}
+
+// clonesPanelView and cloneItemView mirror buildsPanelView/buildItemView for
+// clones.
+type clonesPanelView struct {
+	Items      []cloneItemView
+	Page       int
+	TotalPages int
+}
+
+type cloneItemView struct {
+	cloneView
+	Page int
+	// VMs carries live running state per VM (unlike buildItemView, clone VMs
+	// are always listed — running or not — so power controls can be shown).
+	VMs []cloneVMView
+}
+
+// cloneVMView is one VM within a clone, enriched with its live running state
+// for the /ui clones panel (conditional console link + start/stop buttons).
+type cloneVMView struct {
+	VMName    string
+	Namespace string
+	VMI       string
+	Running   bool
+}
+
+// paginateClones pages views and, only for the items on the returned page,
+// looks up each clone VM's live running state.
+func (s *Server) paginateClones(ctx context.Context, views []cloneView, page int) clonesPanelView {
+	pageViews, page, total := paginate(views, page)
+	items := make([]cloneItemView, 0, len(pageViews))
+	for _, v := range pageViews {
+		vms := make([]cloneVMView, 0, len(v.Consoles))
+		for _, c := range v.Consoles {
+			vms = append(vms, cloneVMView{
+				VMName:    c.VMName,
+				Namespace: c.Namespace,
+				VMI:       c.VMI,
+				Running:   s.vmiRunning(ctx, c.Namespace, c.VMI),
+			})
+		}
+		items = append(items, cloneItemView{cloneView: v, Page: page, VMs: vms})
+	}
+	return clonesPanelView{Items: items, Page: page, TotalPages: total}
+}
+
+// paginate slices items into the requested page (1-indexed, clamped to the
+// valid range) of size uiPageSize, returning that page's items alongside the
+// clamped page number and the total page count (always >= 1).
+func paginate[T any](items []T, page int) (pageItems []T, currentPage, totalPages int) {
+	totalPages = max((len(items)+uiPageSize-1)/uiPageSize, 1)
+	if page < 1 {
+		page = 1
+	}
+	if page > totalPages {
+		page = totalPages
+	}
+	start := (page - 1) * uiPageSize
+	end := min(start+uiPageSize, len(items))
+	if start > len(items) {
+		start = len(items)
+	}
+	return items[start:end], page, totalPages
+}
 
 // classifyCreateErr maps a Create error to an HTTP status and message,
 // shared by the JSON (/api) and HTML (/ui) handlers.
@@ -47,7 +162,7 @@ func (s *Server) uiListBuilds(w http.ResponseWriter, r *http.Request) {
 		s.renderErrorMessage(w, http.StatusInternalServerError, "listing builds: "+err.Error())
 		return
 	}
-	s.renderFragment(w, http.StatusOK, "builds-panel", views)
+	s.renderFragment(w, http.StatusOK, "builds-panel", s.paginateBuilds(r.Context(), views, pageParam(r)))
 }
 
 func (s *Server) uiCreateBuild(w http.ResponseWriter, r *http.Request) {
@@ -72,7 +187,9 @@ func (s *Server) uiCreateBuild(w http.ResponseWriter, r *http.Request) {
 		s.renderErrorMessage(w, status, msg)
 		return
 	}
-	s.renderBuildsPanel(w, r, &oobStatus{ID: "build-status", Msg: "created " + b.Name})
+	// A newly created build is always the most recent (sorted first), so it
+	// always lands on page 1.
+	s.renderBuildsPanel(w, r, 1, &oobStatus{ID: "build-status", Msg: "created " + b.Name})
 }
 
 func (s *Server) uiDeleteBuild(w http.ResponseWriter, r *http.Request) {
@@ -81,16 +198,16 @@ func (s *Server) uiDeleteBuild(w http.ResponseWriter, r *http.Request) {
 		s.renderErrorMessage(w, http.StatusInternalServerError, "deleting build: "+err.Error())
 		return
 	}
-	s.renderBuildsPanel(w, r, nil)
+	s.renderBuildsPanel(w, r, pageParam(r), nil)
 }
 
-func (s *Server) renderBuildsPanel(w http.ResponseWriter, r *http.Request, oob *oobStatus) {
+func (s *Server) renderBuildsPanel(w http.ResponseWriter, r *http.Request, page int, oob *oobStatus) {
 	views, err := s.fetchBuilds(r.Context())
 	if err != nil {
 		s.renderErrorMessage(w, http.StatusInternalServerError, "listing builds: "+err.Error())
 		return
 	}
-	s.renderPanel(w, "builds-panel", views, oob)
+	s.renderPanel(w, "builds-panel", s.paginateBuilds(r.Context(), views, page), oob)
 }
 
 // --- clones ---
@@ -101,7 +218,7 @@ func (s *Server) uiListClones(w http.ResponseWriter, r *http.Request) {
 		s.renderErrorMessage(w, http.StatusInternalServerError, "listing clones: "+err.Error())
 		return
 	}
-	s.renderFragment(w, http.StatusOK, "clones-panel", views)
+	s.renderFragment(w, http.StatusOK, "clones-panel", s.paginateClones(r.Context(), views, pageParam(r)))
 }
 
 // uiCreateClone creates a VirtualMachineClone from the inline "clone" form on
@@ -129,7 +246,7 @@ func (s *Server) uiCreateClone(w http.ResponseWriter, r *http.Request) {
 		s.renderErrorMessage(w, status, msg)
 		return
 	}
-	s.renderClonesPanel(w, r, &oobStatus{ID: "clone-status-" + templateName, Msg: "created " + name})
+	s.renderClonesPanel(w, r, 1, &oobStatus{ID: "clone-status-" + templateName, Msg: "created " + name})
 }
 
 func (s *Server) uiDeleteClone(w http.ResponseWriter, r *http.Request) {
@@ -138,16 +255,44 @@ func (s *Server) uiDeleteClone(w http.ResponseWriter, r *http.Request) {
 		s.renderErrorMessage(w, http.StatusInternalServerError, "deleting clone: "+err.Error())
 		return
 	}
-	s.renderClonesPanel(w, r, nil)
+	s.renderClonesPanel(w, r, pageParam(r), nil)
 }
 
-func (s *Server) renderClonesPanel(w http.ResponseWriter, r *http.Request, oob *oobStatus) {
+func (s *Server) renderClonesPanel(w http.ResponseWriter, r *http.Request, page int, oob *oobStatus) {
 	views, err := s.fetchClones(r.Context())
 	if err != nil {
 		s.renderErrorMessage(w, http.StatusInternalServerError, "listing clones: "+err.Error())
 		return
 	}
-	s.renderPanel(w, "clones-panel", views, oob)
+	s.renderPanel(w, "clones-panel", s.paginateClones(r.Context(), views, page), oob)
+}
+
+// uiSetClonePower switches one VM within a clone on or off. The VM lives in
+// the clone's own namespace (populated once the clone controller has created
+// it), which is looked up from the VirtualMachineClone status.
+func (s *Server) uiSetClonePower(w http.ResponseWriter, r *http.Request, running bool) {
+	var c v1alpha1.VirtualMachineClone
+	key := client.ObjectKey{Namespace: s.namespace, Name: r.PathValue("name")}
+	if err := s.client.Get(r.Context(), key, &c); err != nil {
+		s.renderErrorMessage(w, http.StatusInternalServerError, "loading clone: "+err.Error())
+		return
+	}
+	if c.Status.CloneNamespace == "" {
+		s.renderErrorMessage(w, http.StatusConflict, "clone has no VMs yet")
+		return
+	}
+	if err := s.setVMRunning(r.Context(), c.Status.CloneNamespace, r.PathValue("vmName"), running); err != nil {
+		s.renderErrorMessage(w, http.StatusInternalServerError, "setting power state: "+err.Error())
+		return
+	}
+	s.renderClonesPanel(w, r, pageParam(r), nil)
+}
+
+func (s *Server) uiStartCloneVM(w http.ResponseWriter, r *http.Request) {
+	s.uiSetClonePower(w, r, true)
+}
+func (s *Server) uiStopCloneVM(w http.ResponseWriter, r *http.Request) {
+	s.uiSetClonePower(w, r, false)
 }
 
 // --- grades ---

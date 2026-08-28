@@ -14,7 +14,9 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/fake"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -32,7 +34,36 @@ func testScheme(t *testing.T) *runtime.Scheme {
 	if err := v1alpha1.AddToScheme(s); err != nil {
 		t.Fatal(err)
 	}
+	for _, kind := range []string{"VirtualMachineInstance", "VirtualMachine"} {
+		gvk := schema.GroupVersionKind{Group: "kubevirt.io", Version: "v1", Kind: kind}
+		s.AddKnownTypeWithName(gvk, &unstructured.Unstructured{})
+		listGVK := schema.GroupVersionKind{Group: gvk.Group, Version: gvk.Version, Kind: gvk.Kind + "List"}
+		s.AddKnownTypeWithName(listGVK, &unstructured.UnstructuredList{})
+	}
 	return s
+}
+
+// runningVMI builds a fixture VirtualMachineInstance in the "Running" phase,
+// for tests that need aileron-ui's console/power-control gating to see a
+// live VM.
+func runningVMI(namespace, name string) *unstructured.Unstructured {
+	vmi := &unstructured.Unstructured{}
+	vmi.SetGroupVersionKind(schema.GroupVersionKind{Group: "kubevirt.io", Version: "v1", Kind: "VirtualMachineInstance"})
+	vmi.SetNamespace(namespace)
+	vmi.SetName(name)
+	_ = unstructured.SetNestedField(vmi.Object, "Running", "status", "phase")
+	return vmi
+}
+
+// stoppedVM builds a fixture VirtualMachine with runStrategy Halted, for
+// tests exercising the start/stop power controls.
+func stoppedVM(namespace, name string) *unstructured.Unstructured {
+	vm := &unstructured.Unstructured{}
+	vm.SetGroupVersionKind(schema.GroupVersionKind{Group: "kubevirt.io", Version: "v1", Kind: "VirtualMachine"})
+	vm.SetNamespace(namespace)
+	vm.SetName(name)
+	_ = unstructured.SetNestedField(vm.Object, "Halted", "spec", "runStrategy")
+	return vm
 }
 
 func newTestServer(t *testing.T, objs ...client.Object) *httptest.Server {

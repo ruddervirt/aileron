@@ -157,6 +157,21 @@ rules:
       - pods/log
     verbs:
       - get
+  # Show console links only for running VMs, and offer power controls
+  # (start/stop) on clone VMs.
+  - apiGroups:
+      - kubevirt.io
+    resources:
+      - virtualmachineinstances
+    verbs:
+      - get
+  - apiGroups:
+      - kubevirt.io
+    resources:
+      - virtualmachines
+    verbs:
+      - get
+      - update
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

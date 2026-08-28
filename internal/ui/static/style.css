@@ -104,7 +104,7 @@ details.provs summary { cursor: pointer; color: var(--accent); }
 .prov-msg { padding-left: 6px; }
 .logs { color: var(--accent); margin-left: auto; }
 
-details.new { margin-top: 12px; }
+details.new { margin-bottom: 12px; }
 details.new summary { cursor: pointer; color: var(--accent); }
 textarea {
   width: 100%;
@@ -125,8 +125,21 @@ details.new button { margin-top: 8px; }
 .form-status .fail { color: var(--fail); }
 .time { color: var(--muted); font-size: 11px; margin-left: auto; }
 
-details.new-clone { margin-top: 8px; }
-details.new-clone summary.clone { cursor: pointer; }
+details.new-clone { display: inline-block; }
+details.new-clone summary.clone {
+  list-style: none;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  background: #333;
+  color: var(--ok);
+  border-radius: 4px;
+  padding: 3px 9px;
+  display: inline-block;
+}
+details.new-clone summary.clone::-webkit-details-marker { display: none; }
+details.new-clone summary.clone:hover { border-color: var(--accent); }
 details.new-clone form {
   display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
   margin-top: 6px;
@@ -140,3 +153,19 @@ details.new-clone input[type="text"] {
   font-family: inherit;
   font-size: 12px;
 }
+
+.pager {
+  display: flex; align-items: center; gap: 10px;
+  margin-top: 10px; font-size: 12px; color: var(--muted);
+}
+.pager a { color: var(--accent); }
+.pager .disabled { color: var(--border); }
+
+.vm-controls {
+  display: flex; align-items: center; gap: 8px;
+  margin: 8px 0 4px; padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+.vm-controls .name { font-weight: bold; }
+.power.start { color: var(--ok); }
+.power.stop { color: var(--warn); }

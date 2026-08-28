@@ -14,10 +14,13 @@ import (
 var templatesFS embed.FS
 
 var uiTemplates = template.Must(template.New("ui").Funcs(template.FuncMap{
-	"badgeClass":  badgeClass,
-	"displayTime": displayTime,
-	"consoleHref": consoleHref,
-	"deref":       derefInt32,
+	"badgeClass":    badgeClass,
+	"displayTime":   displayTime,
+	"consoleHref":   consoleHref,
+	"vmConsoleHref": vmConsoleHref,
+	"deref":         derefInt32,
+	"add":           func(a, b int) int { return a + b },
+	"sub":           func(a, b int) int { return a - b },
 }).ParseFS(templatesFS, "templates/*.html.tmpl"))
 
 // badgeClass maps a CR phase/status string to the CSS class used to color
@@ -49,6 +52,11 @@ func displayTime(times ...*metav1.Time) string {
 // escaping is needed.
 func consoleHref(c consoleTarget) string {
 	return "/console.html?ns=" + c.Namespace + "&vmi=" + c.VMI + "&name=" + c.VMName
+}
+
+// vmConsoleHref builds the /console.html link for a cloneVMView.
+func vmConsoleHref(v cloneVMView) string {
+	return consoleHref(consoleTarget{VMName: v.VMName, Namespace: v.Namespace, VMI: v.VMI})
 }
 
 func derefInt32(p *int32) int32 {

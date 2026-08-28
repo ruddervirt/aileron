@@ -21,11 +21,14 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
@@ -97,6 +100,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /ui/clones", s.uiListClones)
 	mux.HandleFunc("POST /ui/clones", s.uiCreateClone)
 	mux.HandleFunc("DELETE /ui/clones/{name}", s.uiDeleteClone)
+	mux.HandleFunc("POST /ui/clones/{name}/vms/{vmName}/start", s.uiStartCloneVM)
+	mux.HandleFunc("POST /ui/clones/{name}/vms/{vmName}/stop", s.uiStopCloneVM)
 
 	mux.HandleFunc("GET /ui/grades", s.uiListGrades)
 	mux.HandleFunc("POST /ui/grades", s.uiCreateGrade)
@@ -288,6 +293,62 @@ func projectClone(c *v1alpha1.VirtualMachineClone) cloneView {
 	return v
 }
 
+// --- kubevirt helpers ------------------------------------------------------
+//
+// aileron-ui talks to KubeVirt's VirtualMachine/VirtualMachineInstance CRs via
+// unstructured.Unstructured (no kubevirt.io/api Go dependency), mirroring the
+// pattern already used in internal/build/vm.go and internal/build/shutdown.go.
+
+var (
+	vmiGVK = schema.GroupVersionKind{Group: "kubevirt.io", Version: "v1", Kind: "VirtualMachineInstance"}
+	vmGVK  = schema.GroupVersionKind{Group: "kubevirt.io", Version: "v1", Kind: "VirtualMachine"}
+)
+
+// vmiRunning reports whether the named VirtualMachineInstance exists and is
+// in the "Running" phase. A stopped VM has no VMI at all, so a NotFound (or
+// any other) error is treated as "not running" rather than surfaced.
+func (s *Server) vmiRunning(ctx context.Context, namespace, name string) bool {
+	vmi := &unstructured.Unstructured{}
+	vmi.SetGroupVersionKind(vmiGVK)
+	if err := s.client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, vmi); err != nil {
+		return false
+	}
+	phase, _, _ := unstructured.NestedString(vmi.Object, "status", "phase")
+	return phase == "Running"
+}
+
+// runningConsoles filters consoles down to those whose VM is actually
+// powered on — a console link to a stopped VM has nothing to connect to.
+func (s *Server) runningConsoles(ctx context.Context, consoles []consoleTarget) []consoleTarget {
+	running := make([]consoleTarget, 0, len(consoles))
+	for _, c := range consoles {
+		if s.vmiRunning(ctx, c.Namespace, c.VMI) {
+			running = append(running, c)
+		}
+	}
+	return running
+}
+
+// setVMRunning switches a VirtualMachine's desired power state, following
+// the same spec.running-removal / spec.runStrategy-set approach as
+// internal/build/shutdown.go.
+func (s *Server) setVMRunning(ctx context.Context, namespace, name string, running bool) error {
+	vm := &unstructured.Unstructured{}
+	vm.SetGroupVersionKind(vmGVK)
+	if err := s.client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, vm); err != nil {
+		return err
+	}
+	strategy := "Halted"
+	if running {
+		strategy = "Always"
+	}
+	unstructured.RemoveNestedField(vm.Object, "spec", "running")
+	if err := unstructured.SetNestedField(vm.Object, strategy, "spec", "runStrategy"); err != nil {
+		return err
+	}
+	return s.client.Update(ctx, vm)
+}
+
 // --- build handlers ------------------------------------------------------
 
 // fetchBuilds lists and projects all builds in the server's namespace,
@@ -297,6 +358,9 @@ func (s *Server) fetchBuilds(ctx context.Context) ([]buildView, error) {
 	if err := s.client.List(ctx, &list, client.InNamespace(s.namespace)); err != nil {
 		return nil, err
 	}
+	sort.Slice(list.Items, func(i, j int) bool {
+		return list.Items[j].CreationTimestamp.Before(&list.Items[i].CreationTimestamp)
+	})
 	views := make([]buildView, 0, len(list.Items))
 	for i := range list.Items {
 		views = append(views, projectBuild(&list.Items[i]))
@@ -434,6 +498,9 @@ func (s *Server) fetchClones(ctx context.Context) ([]cloneView, error) {
 	if err := s.client.List(ctx, &list, client.InNamespace(s.namespace)); err != nil {
 		return nil, err
 	}
+	sort.Slice(list.Items, func(i, j int) bool {
+		return list.Items[j].CreationTimestamp.Before(&list.Items[i].CreationTimestamp)
+	})
 	views := make([]cloneView, 0, len(list.Items))
 	for i := range list.Items {
 		views = append(views, projectClone(&list.Items[i]))

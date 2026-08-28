@@ -16,32 +16,40 @@
 <main>
   <section class="panel">
     <h2>Builds</h2>
-    <div id="builds" class="list"
-         hx-get="/ui/builds" hx-trigger="load, every 4s"
-         hx-target="this" hx-swap="morph:innerHTML" hx-target-error="this">loading&hellip;</div>
     <details class="new">
       <summary>New build</summary>
-      <form hx-post="/ui/builds" hx-target="#builds" hx-swap="morph:innerHTML" hx-target-error="#build-status">
+      <form hx-post="/ui/builds" hx-target="#builds" hx-swap="morph:innerHTML" hx-target-error="#build-status"
+            hx-on::after-request="document.getElementById('builds').dataset.page='1'">
         <textarea name="manifest" id="build-yaml" spellcheck="false"></textarea>
         <button type="submit">Submit build</button>
       </form>
       <div id="build-status" class="form-status"></div>
     </details>
+    <div id="builds" class="list" data-page="1"
+         hx-get="/ui/builds" hx-trigger="load, every 4s" hx-vals="js:{page: this.dataset.page}"
+         hx-target="this" hx-swap="morph:innerHTML" hx-target-error="this">loading&hellip;</div>
   </section>
 
   <section class="panel">
     <h2>Clones</h2>
-    <p class="hint">Clone a succeeded build with its <strong>clone</strong> action.</p>
-    <div id="clones" class="list"
-         hx-get="/ui/clones" hx-trigger="load, every 4s"
+    <p class="hint">Clones can also be created from a succeeded build's <strong>clone</strong> action.</p>
+    <details class="new">
+      <summary>New clone</summary>
+      <form hx-post="/ui/clones" hx-target="#clones" hx-swap="morph:innerHTML" hx-target-error="#clone-status"
+            hx-on::after-request="document.getElementById('clones').dataset.page='1'">
+        <input type="text" name="templateName" placeholder="template (build) name" required>
+        <input type="text" name="name" placeholder="clone name" required>
+        <button type="submit">Submit clone</button>
+      </form>
+      <div id="clone-status" class="form-status"></div>
+    </details>
+    <div id="clones" class="list" data-page="1"
+         hx-get="/ui/clones" hx-trigger="load, every 4s" hx-vals="js:{page: this.dataset.page}"
          hx-target="this" hx-swap="morph:innerHTML" hx-target-error="this">loading&hellip;</div>
   </section>
 
   <section class="panel">
     <h2>Grades</h2>
-    <div id="grades" class="list"
-         hx-get="/ui/grades" hx-trigger="load, every 4s"
-         hx-target="this" hx-swap="morph:innerHTML" hx-target-error="this">loading&hellip;</div>
     <details class="new">
       <summary>New grade</summary>
       <form hx-post="/ui/grades" hx-target="#grades" hx-swap="morph:innerHTML" hx-target-error="#grade-status">
@@ -50,6 +58,9 @@
       </form>
       <div id="grade-status" class="form-status"></div>
     </details>
+    <div id="grades" class="list"
+         hx-get="/ui/grades" hx-trigger="load, every 4s"
+         hx-target="this" hx-swap="morph:innerHTML" hx-target-error="this">loading&hellip;</div>
   </section>
 </main>
 
@@ -101,5 +112,15 @@ spec:
 <script src="/htmx.min.js"></script>
 <script src="/idiomorph-ext.min.js"></script>
 <script src="/response-targets.min.js"></script>
+<script>
+// The server never renders <details open> (it doesn't track UI state), so by
+// default idiomorph would sync every morphed <details>'s "open" attribute
+// back to absent on each poll, snapping open sections shut. Skip morphing
+// that one attribute so a locally-expanded <details> (provisioners, "new
+// build", etc.) stays however the operator left it across polls/mutations.
+Idiomorph.defaults.callbacks.beforeAttributeUpdated = function (attrName, node) {
+  return !(attrName === 'open' && node.tagName === 'DETAILS');
+};
+</script>
 </body>
 </html>
