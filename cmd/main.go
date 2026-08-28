@@ -248,6 +248,16 @@ func main() {
 		setupLog.Error(err, "Failed to add PVC reaper")
 		os.Exit(1)
 	}
+	// Background stats collector: periodically republishes build/clone/grade/pod/PVC
+	// counts as Prometheus gauges.
+	if err := mgr.Add(&controller.StatsCollector{
+		Client:   mgr.GetClient(),
+		Reader:   mgr.GetAPIReader(),
+		Interval: envDuration("STATS_INTERVAL"),
+	}); err != nil {
+		setupLog.Error(err, "Failed to add stats collector")
+		os.Exit(1)
+	}
 	// +kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

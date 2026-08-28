@@ -51,10 +51,15 @@ var (
 		Name: "aileron_clone_pvcs_deleted_total",
 		Help: "Total clone PVCs deleted by the reaper because their VirtualMachineClone was gone.",
 	})
+	// vmnsOrphanedDeleted counts orphaned VirtualMachineNamespace roots the reaper has deleted.
+	vmnsOrphanedDeleted = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "aileron_vmns_orphaned_deleted_total",
+		Help: "Total orphaned VirtualMachineNamespace CRs deleted by the reaper.",
+	})
 )
 
 func init() {
-	crmetrics.Registry.MustRegister(pendingClonePVCs, orphanedClonePVCs, orphanClonePVCsDeleted)
+	crmetrics.Registry.MustRegister(pendingClonePVCs, orphanedClonePVCs, orphanClonePVCsDeleted, vmnsOrphanedDeleted)
 }
 
 // PVCReaper is a background manager.Runnable that keeps clone storage from leaking.
@@ -396,6 +401,7 @@ func (r *PVCReaper) reapOrphanedVMNS(ctx context.Context, ns string, isLive func
 			logger.Error(err, "deleting orphaned VirtualMachineNamespace", "name", vmns.Name, "ownerKind", vmns.Spec.OwnerRef.Kind)
 			continue
 		}
+		vmnsOrphanedDeleted.Inc()
 		logger.Info("Deleted orphaned VirtualMachineNamespace", "name", vmns.Name, "ownerKind", vmns.Spec.OwnerRef.Kind)
 	}
 	return nil

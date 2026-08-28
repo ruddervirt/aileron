@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	v1alpha1 "github.com/ruddervirt/aileron/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -308,8 +309,14 @@ func TestReaper_ReapsOrphanedVMNS(t *testing.T) {
 		WithObjects(cloneVMNS, deadBuildVMNS, liveBuild, liveBuildVMNS).
 		Build()
 
+	before := testutil.ToFloat64(vmnsOrphanedDeleted)
+
 	if err := newReaper(c).sweep(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+
+	if after := testutil.ToFloat64(vmnsOrphanedDeleted); after != before+2 {
+		t.Errorf("vmnsOrphanedDeleted = %v, want %v (one for the clone-owned and one for the build-owned orphan)", after, before+2)
 	}
 
 	vmnsExists := func(name string) bool {

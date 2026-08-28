@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -21,12 +22,24 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	v1alpha1 "github.com/ruddervirt/aileron/api/v1alpha1"
 	"github.com/ruddervirt/aileron/internal/clone"
 	"github.com/ruddervirt/aileron/internal/namespace"
 	"github.com/ruddervirt/aileron/internal/network"
 )
+
+// clonePhaseTransitions counts VirtualMachineClone phase transitions, labeled by
+// the phase transitioned to.
+var clonePhaseTransitions = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "aileron_clone_phase_transitions_total",
+	Help: "Total VirtualMachineClone phase transitions, labeled by the phase transitioned to.",
+}, []string{"phase"})
+
+func init() {
+	crmetrics.Registry.MustRegister(clonePhaseTransitions)
+}
 
 const cloneFinalizerName = "ruddervirt.io/clone-finalizer"
 
@@ -91,6 +104,7 @@ func (r *VirtualMachineCloneReconciler) Reconcile(ctx context.Context, req ctrl.
 	// Initialize phase.
 	if vmClone.Status.Phase == "" {
 		vmClone.Status.Phase = v1alpha1.ClonePhasePending
+		clonePhaseTransitions.WithLabelValues(string(v1alpha1.ClonePhasePending)).Inc()
 		now := metav1.Now()
 		vmClone.Status.StartTime = &now
 	}
@@ -169,6 +183,7 @@ func (r *VirtualMachineCloneReconciler) handlePending(ctx context.Context, vmClo
 	}
 
 	vmClone.Status.Phase = v1alpha1.ClonePhaseValidating
+	clonePhaseTransitions.WithLabelValues(string(v1alpha1.ClonePhaseValidating)).Inc()
 	vmClone.Status.Message = "validating template"
 	if err := r.Client.Status().Update(ctx, vmClone); err != nil {
 		return ctrl.Result{}, err
@@ -191,6 +206,7 @@ func (r *VirtualMachineCloneReconciler) handleValidating(ctx context.Context, vm
 	})
 
 	vmClone.Status.Phase = v1alpha1.ClonePhaseSnapshotSelection
+	clonePhaseTransitions.WithLabelValues(string(v1alpha1.ClonePhaseSnapshotSelection)).Inc()
 	vmClone.Status.Message = fmt.Sprintf("validated template with %d VMs", len(templateVMs))
 	if err := r.Client.Status().Update(ctx, vmClone); err != nil {
 		return ctrl.Result{}, err
@@ -215,6 +231,7 @@ func (r *VirtualMachineCloneReconciler) handleSnapshotSelection(ctx context.Cont
 		vmClone.Status.VolumeStates = states
 		if len(states) == 0 {
 			vmClone.Status.Phase = v1alpha1.ClonePhaseNetworking
+			clonePhaseTransitions.WithLabelValues(string(v1alpha1.ClonePhaseNetworking)).Inc()
 			vmClone.Status.Message = "no volumes require cloning"
 			if err := r.Client.Status().Update(ctx, vmClone); err != nil {
 				return ctrl.Result{}, err
@@ -251,6 +268,7 @@ func (r *VirtualMachineCloneReconciler) handleSnapshotSelection(ctx context.Cont
 		Message: "all snapshots ready",
 	})
 	vmClone.Status.Phase = v1alpha1.ClonePhaseVolumeProvisioning
+	clonePhaseTransitions.WithLabelValues(string(v1alpha1.ClonePhaseVolumeProvisioning)).Inc()
 	vmClone.Status.Message = "snapshots ready, provisioning volumes"
 	if err := r.Client.Status().Update(ctx, vmClone); err != nil {
 		return ctrl.Result{}, err
@@ -316,6 +334,7 @@ func (r *VirtualMachineCloneReconciler) handleVolumeProvisioning(ctx context.Con
 		Message: "all volumes provisioned",
 	})
 	vmClone.Status.Phase = v1alpha1.ClonePhaseNetworking
+	clonePhaseTransitions.WithLabelValues(string(v1alpha1.ClonePhaseNetworking)).Inc()
 	vmClone.Status.Message = "volumes ready, configuring network"
 	if err := r.Client.Status().Update(ctx, vmClone); err != nil {
 		return ctrl.Result{}, err
@@ -343,6 +362,7 @@ func (r *VirtualMachineCloneReconciler) handleNetworking(ctx context.Context, vm
 		}
 		if topo == nil {
 			vmClone.Status.Phase = v1alpha1.ClonePhaseVMProvisioning
+			clonePhaseTransitions.WithLabelValues(string(v1alpha1.ClonePhaseVMProvisioning)).Inc()
 			vmClone.Status.Message = "no network topology, provisioning VMs"
 			if err := r.Client.Status().Update(ctx, vmClone); err != nil {
 				return ctrl.Result{}, err
@@ -369,6 +389,7 @@ func (r *VirtualMachineCloneReconciler) handleNetworking(ctx context.Context, vm
 
 	if len(vpcs) == 0 && len(subnets) == 0 {
 		vmClone.Status.Phase = v1alpha1.ClonePhaseVMProvisioning
+		clonePhaseTransitions.WithLabelValues(string(v1alpha1.ClonePhaseVMProvisioning)).Inc()
 		vmClone.Status.Message = "no network configuration, provisioning VMs"
 		if err := r.Client.Status().Update(ctx, vmClone); err != nil {
 			return ctrl.Result{}, err
@@ -547,6 +568,7 @@ func (r *VirtualMachineCloneReconciler) handleNetworking(ctx context.Context, vm
 		Message: "network resources ready",
 	})
 	vmClone.Status.Phase = v1alpha1.ClonePhaseVMProvisioning
+	clonePhaseTransitions.WithLabelValues(string(v1alpha1.ClonePhaseVMProvisioning)).Inc()
 	vmClone.Status.Message = "network ready, creating VMs"
 	if err := r.Client.Status().Update(ctx, vmClone); err != nil {
 		return ctrl.Result{}, err
@@ -620,6 +642,7 @@ func (r *VirtualMachineCloneReconciler) handleVMProvisioning(ctx context.Context
 	now := metav1.Now()
 	vmClone.Status.CompletionTime = &now
 	vmClone.Status.Phase = v1alpha1.ClonePhaseReady
+	clonePhaseTransitions.WithLabelValues(string(v1alpha1.ClonePhaseReady)).Inc()
 	vmClone.Status.Message = "clone complete"
 	vmClone.Status.EgressGatewayReady = true
 
@@ -873,6 +896,7 @@ func (r *VirtualMachineCloneReconciler) cloneSubnetCIDRs(ctx context.Context, vm
 
 func (r *VirtualMachineCloneReconciler) failClone(ctx context.Context, vmClone *v1alpha1.VirtualMachineClone, reason error) (ctrl.Result, error) {
 	vmClone.Status.Phase = v1alpha1.ClonePhaseFailed
+	clonePhaseTransitions.WithLabelValues(string(v1alpha1.ClonePhaseFailed)).Inc()
 	vmClone.Status.Message = reason.Error()
 	now := metav1.Now()
 	vmClone.Status.CompletionTime = &now

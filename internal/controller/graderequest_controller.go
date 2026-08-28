@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -33,9 +34,21 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlcontroller "sigs.k8s.io/controller-runtime/pkg/controller"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	v1alpha1 "github.com/ruddervirt/aileron/api/v1alpha1"
 )
+
+// gradeReqPhaseTransitions counts GradeRequest phase transitions, labeled by
+// the phase transitioned to.
+var gradeReqPhaseTransitions = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "aileron_gradereq_phase_transitions_total",
+	Help: "Total GradeRequest phase transitions, labeled by the phase transitioned to.",
+}, []string{"phase"})
+
+func init() {
+	crmetrics.Registry.MustRegister(gradeReqPhaseTransitions)
+}
 
 const (
 	gradeDefaultResyncPeriod  = 3 * time.Second
@@ -747,7 +760,7 @@ func (r *GradeRequestReconciler) handleRunningPhase(ctx context.Context, gr *v1a
 
 	if !allDone {
 		if statusChanged {
-			if err := r.updateStatus(ctx, gr); err != nil {
+			if err := r.updateStatus(ctx, gr, gr.Status.Phase); err != nil {
 				log.Error(err, "failed to update grade request status mid-run", "gradeRequest", gr.Name, "namespace", gr.Namespace)
 			}
 		}
@@ -755,6 +768,7 @@ func (r *GradeRequestReconciler) handleRunningPhase(ctx context.Context, gr *v1a
 	}
 
 	// All VMs have reached a terminal state
+	oldPhase := gr.Status.Phase
 	now := metav1.Now()
 	gr.Status.CompletedAt = &now
 	if anyFailed {
@@ -764,7 +778,7 @@ func (r *GradeRequestReconciler) handleRunningPhase(ctx context.Context, gr *v1a
 		gr.Status.Phase = v1alpha1.GradeRequestPhaseReady
 		gr.Status.Message = "All VMs graded successfully"
 	}
-	return r.updateStatus(ctx, gr)
+	return r.updateStatus(ctx, gr, oldPhase)
 }
 
 func (r *GradeRequestReconciler) handleVMJobSuccess(ctx context.Context, gr *v1alpha1.GradeRequest, vmStatus *v1alpha1.GradeVMStatus, job *batchv1.Job) {
@@ -974,7 +988,10 @@ func (r *GradeRequestReconciler) readPodLogs(ctx context.Context, namespace, job
 	return string(data), nil
 }
 
-func (r *GradeRequestReconciler) updateStatus(ctx context.Context, gr *v1alpha1.GradeRequest) error {
+func (r *GradeRequestReconciler) updateStatus(ctx context.Context, gr *v1alpha1.GradeRequest, oldPhase v1alpha1.GradeRequestPhase) error {
+	if oldPhase != gr.Status.Phase {
+		gradeReqPhaseTransitions.WithLabelValues(string(gr.Status.Phase)).Inc()
+	}
 	if err := r.Status().Update(ctx, gr); err != nil {
 		return fmt.Errorf("update grade request status: %w", err)
 	}
@@ -987,6 +1004,9 @@ func (r *GradeRequestReconciler) updateStatus(ctx context.Context, gr *v1alpha1.
 // power-on has already fired by the time the status is written and a failed
 // write would strand the VM (graded with no boot wait, never powered back off).
 func (r *GradeRequestReconciler) patchStatus(ctx context.Context, gr *v1alpha1.GradeRequest, orig *v1alpha1.GradeRequest) error {
+	if orig.Status.Phase != gr.Status.Phase {
+		gradeReqPhaseTransitions.WithLabelValues(string(gr.Status.Phase)).Inc()
+	}
 	if err := r.Status().Patch(ctx, gr, client.MergeFrom(orig)); err != nil {
 		return fmt.Errorf("patch grade request status: %w", err)
 	}
@@ -1012,11 +1032,12 @@ func (r *GradeRequestReconciler) cleanupIfExpired(ctx context.Context, gr *v1alp
 
 func (r *GradeRequestReconciler) failGradeRequest(ctx context.Context, gr *v1alpha1.GradeRequest, msg string) error {
 	log := logf.FromContext(ctx)
+	oldPhase := gr.Status.Phase
 	now := metav1.Now()
 	gr.Status.Phase = v1alpha1.GradeRequestPhaseFailed
 	gr.Status.Message = msg
 	gr.Status.CompletedAt = &now
-	if err := r.updateStatus(ctx, gr); err != nil {
+	if err := r.updateStatus(ctx, gr, oldPhase); err != nil {
 		log.Error(err, "failed to update grade request status to Failed", "gradeRequest", gr.Name, "namespace", gr.Namespace)
 		return err
 	}

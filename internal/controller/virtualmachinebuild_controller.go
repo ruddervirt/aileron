@@ -49,8 +49,15 @@ var buildsDeletedUnclonable = prometheus.NewCounter(prometheus.CounterOpts{
 	Help: "Total VirtualMachineBuild CRs deleted because their template stayed unclonable past FAILURE_RETENTION.",
 })
 
+// buildPhaseTransitions counts VirtualMachineBuild phase transitions, labeled by
+// the phase transitioned to.
+var buildPhaseTransitions = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "aileron_build_phase_transitions_total",
+	Help: "Total VirtualMachineBuild phase transitions, labeled by the phase transitioned to.",
+}, []string{"phase"})
+
 func init() {
-	crmetrics.Registry.MustRegister(buildsDeletedUnclonable)
+	crmetrics.Registry.MustRegister(buildsDeletedUnclonable, buildPhaseTransitions)
 }
 
 const (
@@ -180,6 +187,7 @@ func (r *VirtualMachineBuildReconciler) Reconcile(ctx context.Context, req ctrl.
 				// Hard fail — set minimal status so the failure is visible.
 				now := metav1.Now()
 				vmBuild.Status.Phase = v1alpha1.BuildPhaseFailed
+				buildPhaseTransitions.WithLabelValues(string(v1alpha1.BuildPhaseFailed)).Inc()
 				vmBuild.Status.StartTime = &metav1.Time{Time: now.Time}
 				vmBuild.Status.CompletionTime = &now
 				vmBuild.Status.BuildID = buildID
@@ -266,6 +274,7 @@ func (r *VirtualMachineBuildReconciler) Reconcile(ctx context.Context, req ctrl.
 
 		// Step 2: Write status (buildID, phase, etc.) AFTER spec is stable.
 		vmBuild.Status.Phase = v1alpha1.BuildPhasePending
+		buildPhaseTransitions.WithLabelValues(string(v1alpha1.BuildPhasePending)).Inc()
 		vmBuild.Status.StartTime = &metav1.Time{Time: time.Now()}
 		vmBuild.Status.Network = nil
 		vmBuild.Status.BuildID = buildID
@@ -410,6 +419,7 @@ func (r *VirtualMachineBuildReconciler) Reconcile(ctx context.Context, req ctrl.
 	if phaseChanged {
 		logger.Info("Phase transition", "from", vmBuild.Status.Phase, "to", nextPhase)
 		vmBuild.Status.Phase = nextPhase
+		buildPhaseTransitions.WithLabelValues(string(nextPhase)).Inc()
 		r.setPhaseCondition(vmBuild, nextPhase)
 
 		if build.IsTerminal(nextPhase) {
@@ -754,6 +764,7 @@ func (r *VirtualMachineBuildReconciler) failBuild(ctx context.Context, vmBuild *
 	}
 
 	latest.Status.Phase = v1alpha1.BuildPhaseFailed
+	buildPhaseTransitions.WithLabelValues(string(v1alpha1.BuildPhaseFailed)).Inc()
 	// Truncate message to fit Kubernetes condition limits (32KB max).
 	// Keep the tail — the error reason is usually at the end.
 	if len(message) > 8000 {
