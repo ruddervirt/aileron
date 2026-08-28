@@ -34,12 +34,20 @@
   </div>
   {{if .Message}}<div class="msg">{{.Message}}</div>{{end}}
   {{template "provisioners" .}}
+  {{template "build-spec" .}}
   <div class="actions">
     {{range .Consoles}}<a class="console" href="{{consoleHref .}}" target="_blank" rel="noopener">console: {{.VMName}}</a>{{end}}
     {{if eq .Phase "Succeeded"}}{{template "clone-form" .}}{{end}}
     <button class="danger" hx-delete="/ui/builds/{{.Name}}?page={{.Page}}" hx-target="#builds" hx-swap="morph:innerHTML" hx-confirm="Delete build &quot;{{.Name}}&quot;?">delete</button>
   </div>
 </div>
+{{end}}
+
+{{define "build-spec"}}
+<details class="spec" id="spec-{{.Name}}">
+  <summary>spec</summary>
+  <pre>{{.SpecYAML}}</pre>
+</details>
 {{end}}
 
 {{define "provisioners"}}{{if .VMs}}
@@ -66,17 +74,13 @@
 </details>
 {{end}}{{end}}
 
+{{/* clone-form is a one-click clone: no name field, no confirmation — the
+     server picks a unique name (see uiCreateClone). */}}
 {{define "clone-form"}}
-<details class="new-clone">
-  <summary class="clone">clone</summary>
-  <form hx-post="/ui/clones" hx-target="#clones" hx-swap="morph:innerHTML" hx-target-error="#clone-status-{{.Name}}"
-        hx-on::after-request="document.getElementById('clones').dataset.page='1'">
-    <input type="hidden" name="templateName" value="{{.Name}}">
-    <input type="text" name="name" value="{{.Name}}-clone" required>
-    <button type="submit">create clone</button>
-  </form>
-  <div id="clone-status-{{.Name}}" class="form-status"></div>
-</details>
+<button class="clone" hx-post="/ui/clones" hx-vals='{"templateName": "{{.Name}}"}'
+        hx-target="#clones" hx-swap="morph:innerHTML" hx-target-error="#clone-status-{{.Name}}"
+        hx-on::after-request="document.getElementById('clones').dataset.page='1'">clone</button>
+<span id="clone-status-{{.Name}}" class="form-status"></span>
 {{end}}
 
 {{/* --- clones --- */}}
@@ -104,8 +108,8 @@
     <a class="console" href="{{cloneConsoleHref $clone.Name .}}" target="_blank" rel="noopener">console</a>
   </div>
   {{end}}
-  {{if .VMs}}{{template "grade-form" .}}{{end}}
   <div class="actions">
+    {{if .VMs}}{{template "grade-form" .}}{{end}}
     <button class="danger" hx-delete="/ui/clones/{{.Name}}?page={{.Page}}" hx-target="#clones" hx-swap="morph:innerHTML" hx-confirm="Delete clone &quot;{{.Name}}&quot;?">delete</button>
   </div>
 </div>

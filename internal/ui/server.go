@@ -161,6 +161,11 @@ type buildView struct {
 	CompletionTime *metav1.Time    `json:"completionTime,omitempty"`
 	Consoles       []consoleTarget `json:"consoles"`
 	VMs            []buildVMView   `json:"vms"`
+	// SpecYAML is the build's spec, rendered as YAML for the /ui "spec"
+	// disclosure. Excluded from the /api JSON response (which already
+	// exposes Spec via the raw CR at GET /api/builds/{name}) to avoid
+	// duplicating it in a second, differently-shaped form there.
+	SpecYAML string `json:"-"`
 }
 
 type cloneView struct {
@@ -175,6 +180,17 @@ type cloneView struct {
 	Consoles       []consoleTarget `json:"consoles"`
 }
 
+// specYAML renders a spec struct as YAML for the /ui "spec" disclosure,
+// falling back to an error notice in the unexpected case marshaling fails
+// (a well-formed Go struct should always marshal cleanly).
+func specYAML(spec any) string {
+	b, err := yaml.Marshal(spec)
+	if err != nil {
+		return "error rendering spec: " + err.Error()
+	}
+	return string(b)
+}
+
 func projectBuild(b *v1alpha1.VirtualMachineBuild) buildView {
 	v := buildView{
 		Name:           b.Name,
@@ -186,6 +202,7 @@ func projectBuild(b *v1alpha1.VirtualMachineBuild) buildView {
 		CompletionTime: b.Status.CompletionTime,
 		Consoles:       []consoleTarget{},
 		VMs:            []buildVMView{},
+		SpecYAML:       specYAML(b.Spec),
 	}
 	invisible := make(map[string]bool, len(b.Spec.VMs))
 	for _, vmSpec := range b.Spec.VMs {

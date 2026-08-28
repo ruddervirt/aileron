@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -79,9 +80,11 @@ func TestUIBuildsFragmentHasStableIDs(t *testing.T) {
 		`id="provs-test-simple"`,
 		`hello (shell)`,
 		`console: builder`,
-		// a Succeeded build gets the inline clone mini-form.
+		// a Succeeded build gets the one-click clone button.
 		`hx-post="/ui/clones"`,
-		`value="test-simple"`,
+		`hx-vals='{"templateName": "test-simple"}'`,
+		// and its own spec, viewable inline.
+		`id="spec-test-simple"`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("fragment missing %q\nfull body:\n%s", want, html)
@@ -248,8 +251,8 @@ func TestUICreateCloneFromForm(t *testing.T) {
 	}
 }
 
-// TestUICreateCloneMissingFields rejects a clone submission missing required
-// fields with a 400.
+// TestUICreateCloneMissingFields rejects a clone submission missing
+// templateName with a 400.
 func TestUICreateCloneMissingFields(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
@@ -263,6 +266,31 @@ func TestUICreateCloneMissingFields(t *testing.T) {
 		t.Fatalf("status = %d, want 400", resp.StatusCode)
 	}
 }
+
+// TestUICreateCloneGeneratesName checks the one-click clone path (just
+// templateName, matching the build card's button — no name field, no
+// confirmation) gets a unique, DNS-1123-safe generated name.
+func TestUICreateCloneGeneratesName(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+
+	resp, err := http.PostForm(ts.URL+"/ui/clones", map[string][]string{"templateName": {"test-simple"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, body)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	html := string(body)
+	if !generatedCloneNameRE.MatchString(html) {
+		t.Errorf("body missing a generated ns-<cuid2> clone id: %s", html)
+	}
+}
+
+var generatedCloneNameRE = regexp.MustCompile(`id="clone-ns-[a-z][a-z0-9]{23}"`)
 
 // TestUIGradesFragmentRendersQueuePosition checks a queued grade VM's
 // queuePosition pointer is dereferenced correctly in the rendered fragment

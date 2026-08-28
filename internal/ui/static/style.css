@@ -125,37 +125,37 @@ details.new button { margin-top: 8px; }
 .form-status .fail { color: var(--fail); }
 .time { color: var(--muted); font-size: 11px; margin-left: auto; }
 
-details.new-clone, details.new-grade { display: inline-block; margin-top: 8px; }
-details.new-clone summary.clone, details.new-grade summary.grade {
+details.new-grade { display: inline-block; }
+details.new-grade summary.grade {
   list-style: none;
   cursor: pointer;
   font-family: inherit;
   font-size: 12px;
   border: 1px solid var(--border);
   background: #333;
+  color: var(--warn);
   border-radius: 4px;
   padding: 3px 9px;
   display: inline-block;
 }
-details.new-clone summary.clone { color: var(--ok); }
-details.new-grade summary.grade { color: var(--warn); }
-details.new-clone summary.clone::-webkit-details-marker,
 details.new-grade summary.grade::-webkit-details-marker { display: none; }
-details.new-clone summary.clone:hover, details.new-grade summary.grade:hover { border-color: var(--accent); }
-details.new-clone form {
-  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
-  margin-top: 6px;
-}
+details.new-grade summary.grade:hover { border-color: var(--accent); }
 details.new-grade form { margin-top: 6px; }
 details.new-grade textarea { min-height: 140px; }
-details.new-clone input[type="text"] {
+
+details.spec { margin-top: 8px; }
+details.spec summary { cursor: pointer; color: var(--accent); }
+details.spec pre {
+  margin-top: 6px;
   background: #1a1a1a;
-  color: var(--fg);
   border: 1px solid var(--border);
   border-radius: 4px;
-  padding: 3px 6px;
+  padding: 8px;
   font-family: inherit;
   font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
 }
 
 /* Pagination lives next to the panel's <h2> (an out-of-band swap target),

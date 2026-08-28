@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/nrednav/cuid2"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -207,6 +208,14 @@ func classifyCreateErr(err error, kind string) (status int, msg string) {
 	}
 }
 
+// generateCloneName picks a unique, DNS-1123-safe name for a one-click clone
+// (ns-<cuid2>), so the operator never has to type one. cuid2's output is
+// lowercase alphanumeric starting with a letter, so it's always a valid k8s
+// name segment with no further sanitizing.
+func generateCloneName() string {
+	return "ns-" + cuid2.Generate()
+}
+
 // formManifest reads and validates the "manifest" field of a POSTed form.
 func formManifest(r *http.Request) (string, error) {
 	if err := r.ParseForm(); err != nil {
@@ -286,8 +295,11 @@ func (s *Server) uiListClones(w http.ResponseWriter, r *http.Request) {
 	s.renderFragment(w, "clones-panel", s.paginateClones(r.Context(), views, pageParam(r)))
 }
 
-// uiCreateClone creates a VirtualMachineClone from the inline "clone" form on
-// a succeeded build (name + templateName fields), not a YAML manifest.
+// uiCreateClone creates a VirtualMachineClone from a build's one-click
+// "clone" button (just templateName — no confirmation, no name prompt). The
+// name is generated server-side so there's nothing for the operator to fill
+// in; passing an explicit "name" (unused by the current UI, kept for the
+// JSON-equivalent flexibility the old form-based flow had) overrides it.
 func (s *Server) uiCreateClone(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		s.renderErrorMessage(w, http.StatusBadRequest, "parsing form: "+err.Error())
@@ -295,9 +307,12 @@ func (s *Server) uiCreateClone(w http.ResponseWriter, r *http.Request) {
 	}
 	name := strings.TrimSpace(r.FormValue("name"))
 	templateName := strings.TrimSpace(r.FormValue("templateName"))
-	if name == "" || templateName == "" {
-		s.renderErrorMessage(w, http.StatusBadRequest, "name and templateName are required")
+	if templateName == "" {
+		s.renderErrorMessage(w, http.StatusBadRequest, "templateName is required")
 		return
+	}
+	if name == "" {
+		name = generateCloneName()
 	}
 	c := v1alpha1.VirtualMachineClone{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: s.namespace},

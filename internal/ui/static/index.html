@@ -32,16 +32,6 @@
 
   <section class="panel">
     <h2>Clones <span id="clones-pager" class="pager-inline"></span></h2>
-    <details class="new">
-      <summary>New clone</summary>
-      <form hx-post="/ui/clones" hx-target="#clones" hx-swap="morph:innerHTML" hx-target-error="#clone-status"
-            hx-on::after-request="document.getElementById('clones').dataset.page='1'">
-        <input type="text" name="templateName" placeholder="template (build) name" required>
-        <input type="text" name="name" placeholder="clone name" required>
-        <button type="submit">Submit clone</button>
-      </form>
-      <div id="clone-status" class="form-status"></div>
-    </details>
     <div id="clones" class="list" data-page="1"
          hx-get="/ui/clones" hx-trigger="load, every 4s" hx-vals="js:{page: this.dataset.page}"
          hx-target="this" hx-swap="morph:innerHTML" hx-target-error="this">loading&hellip;</div>
