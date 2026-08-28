@@ -25,6 +25,15 @@ import (
 	v1alpha1 "github.com/ruddervirt/aileron/api/v1alpha1"
 )
 
+// Phase/strategy string literals reused across test fixtures and assertions
+// in this package (goconst wants these deduped into constants).
+const (
+	testPhaseSucceeded    = "Succeeded"
+	testPhaseFailed       = "Failed"
+	testPhaseRunning      = "Running"
+	testRunStrategyAlways = "Always"
+)
+
 func testScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	s := runtime.NewScheme()
@@ -43,24 +52,31 @@ func testScheme(t *testing.T) *runtime.Scheme {
 	return s
 }
 
-// runningVMI builds a fixture VirtualMachineInstance in the "Running" phase,
-// for tests that need aileron-ui's console/power-control gating to see a
-// live VM.
-func runningVMI(namespace, name string) *unstructured.Unstructured {
+// vmiWithPhase builds a fixture VirtualMachineInstance with the given
+// status.phase.
+func vmiWithPhase(namespace, name, phase string) *unstructured.Unstructured {
 	vmi := &unstructured.Unstructured{}
 	vmi.SetGroupVersionKind(schema.GroupVersionKind{Group: "kubevirt.io", Version: "v1", Kind: "VirtualMachineInstance"})
 	vmi.SetNamespace(namespace)
 	vmi.SetName(name)
-	_ = unstructured.SetNestedField(vmi.Object, "Running", "status", "phase")
+	_ = unstructured.SetNestedField(vmi.Object, phase, "status", "phase")
 	return vmi
 }
 
-// stoppedVM builds a fixture VirtualMachine with runStrategy Halted, for
-// tests exercising the start/stop power controls.
-func stoppedVM(namespace, name string) *unstructured.Unstructured {
+// runningVMI builds a fixture VirtualMachineInstance in the "Running" phase,
+// for tests that need aileron-ui's console/power-control gating to see a
+// live VM.
+func runningVMI(namespace, name string) *unstructured.Unstructured {
+	return vmiWithPhase(namespace, name, testPhaseRunning)
+}
+
+// stoppedVM builds a fixture VirtualMachine (in the fixed "ns-abc123"
+// namespace test clones use) with runStrategy Halted, for tests exercising
+// the start/stop power controls.
+func stoppedVM(name string) *unstructured.Unstructured {
 	vm := &unstructured.Unstructured{}
 	vm.SetGroupVersionKind(schema.GroupVersionKind{Group: "kubevirt.io", Version: "v1", Kind: "VirtualMachine"})
-	vm.SetNamespace(namespace)
+	vm.SetNamespace("ns-abc123")
 	vm.SetName(name)
 	_ = unstructured.SetNestedField(vm.Object, "Halted", "spec", "runStrategy")
 	return vm
@@ -223,8 +239,8 @@ func TestBuildProvisionerStatus(t *testing.T) {
 				Phase:  "Provisioning",
 				VMName: "vm-abc123-builder",
 				ProvisionerResults: []v1alpha1.ProvisionerResult{
-					{Index: 0, Type: "shell", Name: "hello", Status: "Succeeded", Duration: &metav1.Duration{Duration: 3 * time.Second}},
-					{Index: 1, Type: "shell", Name: "fail", Status: "Failed", Message: "exit code 1"},
+					{Index: 0, Type: "shell", Name: "hello", Status: testPhaseSucceeded, Duration: &metav1.Duration{Duration: 3 * time.Second}},
+					{Index: 1, Type: "shell", Name: "fail", Status: testPhaseFailed, Message: "exit code 1"},
 				},
 			}},
 		},
@@ -249,10 +265,10 @@ func TestBuildProvisionerStatus(t *testing.T) {
 	if len(provs) != 2 {
 		t.Fatalf("got %d provisioners, want 2", len(provs))
 	}
-	if provs[0].Name != "hello" || provs[0].Status != "Succeeded" || provs[0].Duration != "3s" {
+	if provs[0].Name != "hello" || provs[0].Status != testPhaseSucceeded || provs[0].Duration != "3s" {
 		t.Errorf("prov[0] = %+v, want hello/Succeeded/3s", provs[0])
 	}
-	if provs[1].Status != "Failed" || provs[1].Message != "exit code 1" {
+	if provs[1].Status != testPhaseFailed || provs[1].Message != "exit code 1" {
 		t.Errorf("prov[1] = %+v, want Failed with message", provs[1])
 	}
 }
@@ -392,7 +408,7 @@ func TestListGradesProjectsVMs(t *testing.T) {
 		t.Fatalf("got %d grades, want 1", len(views))
 	}
 	g := views[0]
-	if g.Phase != "Running" || g.TargetNamespace != "ns-example" {
+	if g.Phase != testPhaseRunning || g.TargetNamespace != "ns-example" {
 		t.Errorf("grade = %+v, want phase=Running targetNamespace=ns-example", g)
 	}
 	if len(g.VMs) != 1 || g.VMs[0].Name != "clone-simple-builder" || g.VMs[0].Phase != "Ready" {

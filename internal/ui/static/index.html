@@ -15,7 +15,7 @@
 
 <main>
   <section class="panel">
-    <h2>Builds</h2>
+    <h2>Builds <span id="builds-pager" class="pager-inline"></span></h2>
     <details class="new">
       <summary>New build</summary>
       <form hx-post="/ui/builds" hx-target="#builds" hx-swap="morph:innerHTML" hx-target-error="#build-status"
@@ -31,8 +31,7 @@
   </section>
 
   <section class="panel">
-    <h2>Clones</h2>
-    <p class="hint">Clones can also be created from a succeeded build's <strong>clone</strong> action.</p>
+    <h2>Clones <span id="clones-pager" class="pager-inline"></span></h2>
     <details class="new">
       <summary>New clone</summary>
       <form hx-post="/ui/clones" hx-target="#clones" hx-swap="morph:innerHTML" hx-target-error="#clone-status"

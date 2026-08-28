@@ -5,6 +5,7 @@ package ui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -76,38 +77,102 @@ type clonesPanelView struct {
 type cloneItemView struct {
 	cloneView
 	Page int
-	// VMs carries live running state per VM (unlike buildItemView, clone VMs
-	// are always listed — running or not — so power controls can be shown).
+	// VMs carries live power state per VM (unlike buildItemView, clone VMs
+	// are always listed — running or not — since the console page, where
+	// power controls now live, needs a target VM even when it's stopped).
 	VMs []cloneVMView
+	// GradeManifest is a pre-filled GradeRequest YAML manifest naming this
+	// clone's VMs, for the "grade" mini-form. Empty (and the form hidden) if
+	// the clone has no VMs yet.
+	GradeManifest string
 }
 
-// cloneVMView is one VM within a clone, enriched with its live running state
-// for the /ui clones panel (conditional console link + start/stop buttons).
+// cloneVMView is one VM within a clone, enriched with its live power phase
+// for the /ui clones panel (a status badge; the console link always renders
+// since power controls, and thus the ability to start a stopped VM, now live
+// on the console page itself).
 type cloneVMView struct {
 	VMName    string
 	Namespace string
 	VMI       string
-	Running   bool
+	Phase     string
 }
 
 // paginateClones pages views and, only for the items on the returned page,
-// looks up each clone VM's live running state.
+// looks up each clone VM's live power phase and builds its grade-form
+// manifest.
 func (s *Server) paginateClones(ctx context.Context, views []cloneView, page int) clonesPanelView {
 	pageViews, page, total := paginate(views, page)
 	items := make([]cloneItemView, 0, len(pageViews))
 	for _, v := range pageViews {
 		vms := make([]cloneVMView, 0, len(v.Consoles))
+		vmNames := make([]string, 0, len(v.Consoles))
 		for _, c := range v.Consoles {
 			vms = append(vms, cloneVMView{
 				VMName:    c.VMName,
 				Namespace: c.Namespace,
 				VMI:       c.VMI,
-				Running:   s.vmiRunning(ctx, c.Namespace, c.VMI),
+				Phase:     string(s.vmPowerPhase(ctx, c.Namespace, c.VMI)),
 			})
+			vmNames = append(vmNames, c.VMName)
 		}
-		items = append(items, cloneItemView{cloneView: v, Page: page, VMs: vms})
+		item := cloneItemView{cloneView: v, Page: page, VMs: vms}
+		if len(vmNames) > 0 {
+			item.GradeManifest = s.cloneGradeManifest(ctx, v, v.Consoles[0].Namespace, vmNames)
+		}
+		items = append(items, item)
 	}
 	return clonesPanelView{Items: items, Page: page, TotalPages: total}
+}
+
+// cloneGradeManifest builds a pre-filled GradeRequest YAML manifest for a
+// clone's VMs: names and (best-effort) a shared SSH username inherited from
+// the source build, target namespace (the clone's own ephemeral VM
+// namespace, not the VirtualMachineClone CR's namespace), and empty commands
+// for the operator to fill in.
+func (s *Server) cloneGradeManifest(ctx context.Context, c cloneView, vmNamespace string, vmNames []string) string {
+	user := s.defaultSSHUsername(ctx, c.Namespace, c.TemplateName)
+	var b strings.Builder
+	b.WriteString("apiVersion: ruddervirt.io/v1alpha1\n")
+	b.WriteString("kind: GradeRequest\n")
+	b.WriteString("metadata:\n")
+	fmt.Fprintf(&b, "  name: %s-grade\n", c.Name)
+	b.WriteString("spec:\n")
+	fmt.Fprintf(&b, "  namespace: %s\n", vmNamespace)
+	b.WriteString("  vms:\n")
+	for _, name := range vmNames {
+		fmt.Fprintf(&b, "    - name: %s\n", name)
+		fmt.Fprintf(&b, "      user: %s\n", user)
+		b.WriteString("      password: \"\"\n")
+		b.WriteString("      commands: []\n")
+	}
+	return b.String()
+}
+
+// defaultSSHUsername returns the source build's communicator SSH username,
+// if every one of its VMs shares the same non-empty value — otherwise "",
+// leaving the field for the operator to fill in rather than guessing wrong.
+func (s *Server) defaultSSHUsername(ctx context.Context, namespace, templateName string) string {
+	if templateName == "" {
+		return ""
+	}
+	var build v1alpha1.VirtualMachineBuild
+	if err := s.client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: templateName}, &build); err != nil {
+		return ""
+	}
+	user := ""
+	for _, vm := range build.Spec.VMs {
+		u := vm.Communicator.SSHUsername
+		if u == "" {
+			continue
+		}
+		if user == "" {
+			user = u
+		} else if user != u {
+			return ""
+		}
+	}
+	return user
 }
 
 // paginate slices items into the requested page (1-indexed, clamped to the
@@ -162,7 +227,7 @@ func (s *Server) uiListBuilds(w http.ResponseWriter, r *http.Request) {
 		s.renderErrorMessage(w, http.StatusInternalServerError, "listing builds: "+err.Error())
 		return
 	}
-	s.renderFragment(w, http.StatusOK, "builds-panel", s.paginateBuilds(r.Context(), views, pageParam(r)))
+	s.renderFragment(w, "builds-panel", s.paginateBuilds(r.Context(), views, pageParam(r)))
 }
 
 func (s *Server) uiCreateBuild(w http.ResponseWriter, r *http.Request) {
@@ -218,7 +283,7 @@ func (s *Server) uiListClones(w http.ResponseWriter, r *http.Request) {
 		s.renderErrorMessage(w, http.StatusInternalServerError, "listing clones: "+err.Error())
 		return
 	}
-	s.renderFragment(w, http.StatusOK, "clones-panel", s.paginateClones(r.Context(), views, pageParam(r)))
+	s.renderFragment(w, "clones-panel", s.paginateClones(r.Context(), views, pageParam(r)))
 }
 
 // uiCreateClone creates a VirtualMachineClone from the inline "clone" form on
@@ -267,12 +332,47 @@ func (s *Server) renderClonesPanel(w http.ResponseWriter, r *http.Request, page 
 	s.renderPanel(w, "clones-panel", s.paginateClones(r.Context(), views, page), oob)
 }
 
-// uiSetClonePower switches one VM within a clone on or off. The VM lives in
-// the clone's own namespace (populated once the clone controller has created
-// it), which is looked up from the VirtualMachineClone status.
-func (s *Server) uiSetClonePower(w http.ResponseWriter, r *http.Request, running bool) {
+// clonePowerPhase looks up a clone VM's power phase, resolving the clone's
+// ephemeral VM namespace from its status first.
+func (s *Server) clonePowerPhase(ctx context.Context, cloneName, vmName string) (vmPowerPhase, error) {
 	var c v1alpha1.VirtualMachineClone
-	key := client.ObjectKey{Namespace: s.namespace, Name: r.PathValue("name")}
+	key := client.ObjectKey{Namespace: s.namespace, Name: cloneName}
+	if err := s.client.Get(ctx, key, &c); err != nil {
+		return "", err
+	}
+	if c.Status.CloneNamespace == "" {
+		return vmPowerStopped, nil
+	}
+	return s.vmPowerPhase(ctx, c.Status.CloneNamespace, vmName), nil
+}
+
+// uiCloneVMPower renders the current power phase + control for one clone VM.
+// The console page polls this to show live "Starting"/"Stopping" progress
+// (KubeVirt takes up to roughly a minute to boot or tear down a VM) without
+// the operator needing to guess whether anything is happening.
+func (s *Server) uiCloneVMPower(w http.ResponseWriter, r *http.Request) {
+	name, vmName := r.PathValue("name"), r.PathValue("vmName")
+	phase, err := s.clonePowerPhase(r.Context(), name, vmName)
+	if err != nil {
+		s.renderErrorMessage(w, http.StatusInternalServerError, "loading power state: "+err.Error())
+		return
+	}
+	s.renderFragment(w, "power-widget", powerWidgetView{CloneName: name, VMName: vmName, Phase: string(phase), TargetID: "power"})
+}
+
+// uiSetClonePower switches one VM within a clone on or off, then renders the
+// same "power" fragment uiCloneVMPower does. It's reachable from two places
+// — a VM row on the clone card, and console.html's power panel — each with a
+// different swap target, so the caller passes back which one via ?target=
+// (defaulting to "power", the console page's fixed id).
+func (s *Server) uiSetClonePower(w http.ResponseWriter, r *http.Request, running bool) {
+	name, vmName := r.PathValue("name"), r.PathValue("vmName")
+	target := r.URL.Query().Get("target")
+	if target == "" {
+		target = "power"
+	}
+	var c v1alpha1.VirtualMachineClone
+	key := client.ObjectKey{Namespace: s.namespace, Name: name}
 	if err := s.client.Get(r.Context(), key, &c); err != nil {
 		s.renderErrorMessage(w, http.StatusInternalServerError, "loading clone: "+err.Error())
 		return
@@ -281,11 +381,12 @@ func (s *Server) uiSetClonePower(w http.ResponseWriter, r *http.Request, running
 		s.renderErrorMessage(w, http.StatusConflict, "clone has no VMs yet")
 		return
 	}
-	if err := s.setVMRunning(r.Context(), c.Status.CloneNamespace, r.PathValue("vmName"), running); err != nil {
+	if err := s.setVMRunning(r.Context(), c.Status.CloneNamespace, vmName, running); err != nil {
 		s.renderErrorMessage(w, http.StatusInternalServerError, "setting power state: "+err.Error())
 		return
 	}
-	s.renderClonesPanel(w, r, pageParam(r), nil)
+	phase := s.vmPowerPhase(r.Context(), c.Status.CloneNamespace, vmName)
+	s.renderFragment(w, "power-widget", powerWidgetView{CloneName: name, VMName: vmName, Phase: string(phase), TargetID: target})
 }
 
 func (s *Server) uiStartCloneVM(w http.ResponseWriter, r *http.Request) {
@@ -293,6 +394,26 @@ func (s *Server) uiStartCloneVM(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) uiStopCloneVM(w http.ResponseWriter, r *http.Request) {
 	s.uiSetClonePower(w, r, false)
+}
+
+// --- console page ---
+
+// consolePageView is the data for the console.html template: the power
+// widget's poll URL, present only when reached via a clone VM's console
+// link (?clone=&vm=), since build VMs have no power controls.
+type consolePageView struct {
+	PowerEndpoint string
+}
+
+// uiConsolePage renders console.html, adding the clone VM power-control
+// widget when the request carries clone/vm query params.
+func (s *Server) uiConsolePage(w http.ResponseWriter, r *http.Request) {
+	var data consolePageView
+	clone, vm := r.URL.Query().Get("clone"), r.URL.Query().Get("vm")
+	if clone != "" && vm != "" {
+		data.PowerEndpoint = "/ui/clones/" + clone + "/vms/" + vm + "/power"
+	}
+	s.renderFragment(w, "console.html.tmpl", data)
 }
 
 // --- grades ---
@@ -303,7 +424,7 @@ func (s *Server) uiListGrades(w http.ResponseWriter, r *http.Request) {
 		s.renderErrorMessage(w, http.StatusInternalServerError, "listing grades: "+err.Error())
 		return
 	}
-	s.renderFragment(w, http.StatusOK, "grades-panel", views)
+	s.renderFragment(w, "grades-panel", views)
 }
 
 func (s *Server) uiCreateGrade(w http.ResponseWriter, r *http.Request) {

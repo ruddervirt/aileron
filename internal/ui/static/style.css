@@ -47,7 +47,7 @@ main {
   border-radius: 6px;
   padding: 12px;
 }
-.panel h2 { margin: 0 0 10px; font-size: 15px; }
+.panel h2 { margin: 0 0 10px; font-size: 15px; display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
 
 .list { display: flex; flex-direction: column; gap: 8px; }
 
@@ -125,25 +125,29 @@ details.new button { margin-top: 8px; }
 .form-status .fail { color: var(--fail); }
 .time { color: var(--muted); font-size: 11px; margin-left: auto; }
 
-details.new-clone { display: inline-block; }
-details.new-clone summary.clone {
+details.new-clone, details.new-grade { display: inline-block; margin-top: 8px; }
+details.new-clone summary.clone, details.new-grade summary.grade {
   list-style: none;
   cursor: pointer;
   font-family: inherit;
   font-size: 12px;
   border: 1px solid var(--border);
   background: #333;
-  color: var(--ok);
   border-radius: 4px;
   padding: 3px 9px;
   display: inline-block;
 }
-details.new-clone summary.clone::-webkit-details-marker { display: none; }
-details.new-clone summary.clone:hover { border-color: var(--accent); }
+details.new-clone summary.clone { color: var(--ok); }
+details.new-grade summary.grade { color: var(--warn); }
+details.new-clone summary.clone::-webkit-details-marker,
+details.new-grade summary.grade::-webkit-details-marker { display: none; }
+details.new-clone summary.clone:hover, details.new-grade summary.grade:hover { border-color: var(--accent); }
 details.new-clone form {
   display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
   margin-top: 6px;
 }
+details.new-grade form { margin-top: 6px; }
+details.new-grade textarea { min-height: 140px; }
 details.new-clone input[type="text"] {
   background: #1a1a1a;
   color: var(--fg);
@@ -154,12 +158,14 @@ details.new-clone input[type="text"] {
   font-size: 12px;
 }
 
-.pager {
-  display: flex; align-items: center; gap: 10px;
-  margin-top: 10px; font-size: 12px; color: var(--muted);
+/* Pagination lives next to the panel's <h2> (an out-of-band swap target),
+   not below the list, so paging doesn't grow/shrink the list's height. */
+.pager-inline {
+  font-size: 11px; font-weight: normal; color: var(--muted);
+  display: inline-flex; align-items: center; gap: 4px;
 }
-.pager a { color: var(--accent); }
-.pager .disabled { color: var(--border); }
+.pager-inline a { color: var(--accent); }
+.pager-inline .disabled { color: var(--border); }
 
 .vm-controls {
   display: flex; align-items: center; gap: 8px;
@@ -169,3 +175,8 @@ details.new-clone input[type="text"] {
 .vm-controls .name { font-weight: bold; }
 .power.start { color: var(--ok); }
 .power.stop { color: var(--warn); }
+
+/* Power-widget wrapper spans (one per VM row on the clone card, plus
+   console.html's #power) shouldn't generate their own box — their
+   badge+button children lay out directly in the parent flex row. */
+#power, [id^="vm-power-"] { display: contents; }

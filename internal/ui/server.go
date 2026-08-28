@@ -100,6 +100,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /ui/clones", s.uiListClones)
 	mux.HandleFunc("POST /ui/clones", s.uiCreateClone)
 	mux.HandleFunc("DELETE /ui/clones/{name}", s.uiDeleteClone)
+	mux.HandleFunc("GET /ui/clones/{name}/vms/{vmName}/power", s.uiCloneVMPower)
 	mux.HandleFunc("POST /ui/clones/{name}/vms/{vmName}/start", s.uiStartCloneVM)
 	mux.HandleFunc("POST /ui/clones/{name}/vms/{vmName}/stop", s.uiStopCloneVM)
 
@@ -109,7 +110,11 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /vnc/{namespace}/{vmi}", s.proxyVNC)
 
-	// Everything else: the embedded SPA (index.html, console.html, assets).
+	// console.html is templated (not a static file) so it can conditionally
+	// render clone VM power controls when reached via a clone's console link.
+	mux.HandleFunc("GET /console.html", s.uiConsolePage)
+
+	// Everything else: the embedded SPA (index.html, assets).
 	sub, err := fs.Sub(staticFS, "static")
 	if err != nil {
 		// staticFS is compiled in, so this cannot fail at runtime.
@@ -327,6 +332,63 @@ func (s *Server) runningConsoles(ctx context.Context, consoles []consoleTarget) 
 		}
 	}
 	return running
+}
+
+// vmPowerPhase is a coarse power state for a clone VM, derived by combining
+// its VirtualMachineInstance's live phase with its VirtualMachine's desired
+// state. Unlike the simple running/not-running check builds use for their
+// console gate, clones also distinguish the ~minute KubeVirt takes to boot
+// or tear down a VM, so the UI can show that something is happening instead
+// of looking stuck.
+type vmPowerPhase string
+
+const (
+	vmPowerRunning  vmPowerPhase = "Running"
+	vmPowerStarting vmPowerPhase = "Starting"
+	vmPowerStopping vmPowerPhase = "Stopping"
+	vmPowerStopped  vmPowerPhase = "Stopped"
+)
+
+// vmiPhase returns a VirtualMachineInstance's status.phase, or "" if it
+// doesn't exist (e.g. the VM is fully stopped).
+func (s *Server) vmiPhase(ctx context.Context, namespace, name string) string {
+	vmi := &unstructured.Unstructured{}
+	vmi.SetGroupVersionKind(vmiGVK)
+	if err := s.client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, vmi); err != nil {
+		return ""
+	}
+	phase, _, _ := unstructured.NestedString(vmi.Object, "status", "phase")
+	return phase
+}
+
+// vmDesiredRunning reports whether a VirtualMachine's spec asks for it to be
+// running (spec.runStrategy, or the legacy spec.running boolean).
+func (s *Server) vmDesiredRunning(ctx context.Context, namespace, name string) bool {
+	vm := &unstructured.Unstructured{}
+	vm.SetGroupVersionKind(vmGVK)
+	if err := s.client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, vm); err != nil {
+		return false
+	}
+	if strategy, ok, _ := unstructured.NestedString(vm.Object, "spec", "runStrategy"); ok {
+		return strategy == "Always" || strategy == "Once" || strategy == "RerunOnFailure"
+	}
+	running, _, _ := unstructured.NestedBool(vm.Object, "spec", "running")
+	return running
+}
+
+// vmPowerPhase derives the coarse power phase described above.
+func (s *Server) vmPowerPhase(ctx context.Context, namespace, name string) vmPowerPhase {
+	phase := s.vmiPhase(ctx, namespace, name)
+	switch {
+	case phase == "Running":
+		return vmPowerRunning
+	case s.vmDesiredRunning(ctx, namespace, name):
+		return vmPowerStarting
+	case phase != "" && phase != "Succeeded" && phase != "Failed":
+		return vmPowerStopping
+	default:
+		return vmPowerStopped
+	}
 }
 
 // setVMRunning switches a VirtualMachine's desired power state, following

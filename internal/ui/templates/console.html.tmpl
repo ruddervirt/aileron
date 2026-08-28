@@ -5,6 +5,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>console</title>
+<link rel="stylesheet" href="/style.css">
 <style>
   html, body { height: 100%; }
   body {
@@ -35,6 +36,9 @@
   <span id="name"></span>
   <span id="state">connecting&hellip;</span>
   <button id="shot" disabled>screenshot</button>
+  {{if .PowerEndpoint}}
+  <div id="power" hx-get="{{.PowerEndpoint}}" hx-trigger="load, every 3s" hx-target="this" hx-swap="innerHTML"></div>
+  {{end}}
 </div>
 <div id="viewport"><div id="display" tabindex="0"></div></div>
 <!-- guacamole-common.min.js (CommonJS build) ends with an unguarded
@@ -43,5 +47,6 @@
 <script>window.module = { exports: {} };</script>
 <script src="/guacamole-common.min.js"></script>
 <script src="/console.js"></script>
+{{if .PowerEndpoint}}<script src="/htmx.min.js"></script>{{end}}
 </body>
 </html>

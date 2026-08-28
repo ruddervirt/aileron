@@ -9,17 +9,20 @@
 
 {{define "builds-panel"}}
 {{if .Items}}{{range .Items}}{{template "build-item" .}}{{end}}{{else}}<div class="empty">none</div>{{end}}
-{{if gt .TotalPages 1}}
-<div class="pager">
-  {{if gt .Page 1}}
-  <a href="#" hx-get="/ui/builds?page={{sub .Page 1}}" hx-target="#builds" hx-swap="morph:innerHTML" hx-on:click="document.getElementById('builds').dataset.page='{{sub .Page 1}}'">&laquo; prev</a>
-  {{else}}<span class="disabled">&laquo; prev</span>{{end}}
-  <span class="page-info">page {{.Page}} / {{.TotalPages}}</span>
-  {{if lt .Page .TotalPages}}
-  <a href="#" hx-get="/ui/builds?page={{add .Page 1}}" hx-target="#builds" hx-swap="morph:innerHTML" hx-on:click="document.getElementById('builds').dataset.page='{{add .Page 1}}'">next &raquo;</a>
-  {{else}}<span class="disabled">next &raquo;</span>{{end}}
-</div>
+{{template "pager-oob" (pagerCtx "builds" "/ui/builds" .Page .TotalPages)}}
 {{end}}
+
+{{/* pager-oob renders Prev/Next page controls as an out-of-band swap into
+     the small <span id="{container}-pager"> next to the panel's <h2>, so
+     pagination doesn't grow/shrink the list itself and stays in sync with
+     every response (poll, create, delete, or a pager click) regardless of
+     what that response's primary target is. */}}
+{{define "pager-oob"}}
+<span id="{{.Container}}-pager" class="pager-inline" hx-swap-oob="true">{{if gt .TotalPages 1}}
+  {{if gt .Page 1}}<a href="#" hx-get="{{.Endpoint}}?page={{sub .Page 1}}" hx-target="#{{.Container}}" hx-swap="morph:innerHTML" hx-on:click="document.getElementById('{{.Container}}').dataset.page='{{sub .Page 1}}'">&laquo;</a>{{else}}<span class="disabled">&laquo;</span>{{end}}
+  <span class="page-info">{{.Page}}/{{.TotalPages}}</span>
+  {{if lt .Page .TotalPages}}<a href="#" hx-get="{{.Endpoint}}?page={{add .Page 1}}" hx-target="#{{.Container}}" hx-swap="morph:innerHTML" hx-on:click="document.getElementById('{{.Container}}').dataset.page='{{add .Page 1}}'">&raquo;</a>{{else}}<span class="disabled">&raquo;</span>{{end}}
+{{end}}</span>
 {{end}}
 
 {{define "build-item"}}
@@ -80,17 +83,7 @@
 
 {{define "clones-panel"}}
 {{if .Items}}{{range .Items}}{{template "clone-item" .}}{{end}}{{else}}<div class="empty">none</div>{{end}}
-{{if gt .TotalPages 1}}
-<div class="pager">
-  {{if gt .Page 1}}
-  <a href="#" hx-get="/ui/clones?page={{sub .Page 1}}" hx-target="#clones" hx-swap="morph:innerHTML" hx-on:click="document.getElementById('clones').dataset.page='{{sub .Page 1}}'">&laquo; prev</a>
-  {{else}}<span class="disabled">&laquo; prev</span>{{end}}
-  <span class="page-info">page {{.Page}} / {{.TotalPages}}</span>
-  {{if lt .Page .TotalPages}}
-  <a href="#" hx-get="/ui/clones?page={{add .Page 1}}" hx-target="#clones" hx-swap="morph:innerHTML" hx-on:click="document.getElementById('clones').dataset.page='{{add .Page 1}}'">next &raquo;</a>
-  {{else}}<span class="disabled">next &raquo;</span>{{end}}
-</div>
-{{end}}
+{{template "pager-oob" (pagerCtx "clones" "/ui/clones" .Page .TotalPages)}}
 {{end}}
 
 {{define "clone-item"}}
@@ -104,20 +97,42 @@
   {{if .Message}}<div class="msg">{{.Message}}</div>{{end}}
   {{$clone := .}}
   {{range .VMs}}
+  {{$w := clonePowerWidget $clone.Name .}}
   <div class="vm-controls">
     <span class="name">{{.VMName}}</span>
-    {{if .Running}}
-    <a class="console" href="{{vmConsoleHref .}}" target="_blank" rel="noopener">console</a>
-    <button class="power stop" hx-post="/ui/clones/{{$clone.Name}}/vms/{{.VMName}}/stop?page={{$clone.Page}}" hx-target="#clones" hx-swap="morph:innerHTML" hx-confirm="Stop VM &quot;{{.VMName}}&quot;?">stop</button>
-    {{else}}
-    <button class="power start" hx-post="/ui/clones/{{$clone.Name}}/vms/{{.VMName}}/start?page={{$clone.Page}}" hx-target="#clones" hx-swap="morph:innerHTML">start</button>
-    {{end}}
+    <span id="{{$w.TargetID}}">{{template "power-widget" $w}}</span>
+    <a class="console" href="{{cloneConsoleHref $clone.Name .}}" target="_blank" rel="noopener">console</a>
   </div>
   {{end}}
+  {{if .VMs}}{{template "grade-form" .}}{{end}}
   <div class="actions">
     <button class="danger" hx-delete="/ui/clones/{{.Name}}?page={{.Page}}" hx-target="#clones" hx-swap="morph:innerHTML" hx-confirm="Delete clone &quot;{{.Name}}&quot;?">delete</button>
   </div>
 </div>
+{{end}}
+
+{{define "grade-form"}}
+<details class="new-grade">
+  <summary class="grade">grade</summary>
+  <form hx-post="/ui/grades" hx-target="#grades" hx-swap="morph:innerHTML" hx-target-error="#grade-status-{{.Name}}">
+    <textarea name="manifest" spellcheck="false">{{.GradeManifest}}</textarea>
+    <button type="submit">submit grade</button>
+  </form>
+  <div id="grade-status-{{.Name}}" class="form-status"></div>
+</details>
+{{end}}
+
+{{/* power-widget renders a clone VM's live power phase, and (only when
+     actionable) a start/stop button. Shared by the clone card (one widget
+     per VM row, TargetID unique per clone+VM) and console.html's power panel
+     (TargetID always "power", since a console page shows one VM). */}}
+{{define "power-widget"}}
+<span class="badge {{badgeClass .Phase}}">{{.Phase}}</span>
+{{if eq .Phase "Stopped"}}
+<button class="power start" hx-post="/ui/clones/{{.CloneName}}/vms/{{.VMName}}/start?target={{.TargetID}}" hx-target="#{{.TargetID}}" hx-swap="innerHTML">start</button>
+{{else if eq .Phase "Running"}}
+<button class="power stop" hx-post="/ui/clones/{{.CloneName}}/vms/{{.VMName}}/stop?target={{.TargetID}}" hx-target="#{{.TargetID}}" hx-swap="innerHTML" hx-confirm="Stop VM &quot;{{.VMName}}&quot;?">stop</button>
+{{end}}
 {{end}}
 
 {{/* --- grades --- */}}

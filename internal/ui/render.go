@@ -14,20 +14,22 @@ import (
 var templatesFS embed.FS
 
 var uiTemplates = template.Must(template.New("ui").Funcs(template.FuncMap{
-	"badgeClass":    badgeClass,
-	"displayTime":   displayTime,
-	"consoleHref":   consoleHref,
-	"vmConsoleHref": vmConsoleHref,
-	"deref":         derefInt32,
-	"add":           func(a, b int) int { return a + b },
-	"sub":           func(a, b int) int { return a - b },
+	"badgeClass":       badgeClass,
+	"displayTime":      displayTime,
+	"consoleHref":      consoleHref,
+	"cloneConsoleHref": cloneConsoleHref,
+	"clonePowerWidget": clonePowerWidget,
+	"pagerCtx":         pagerCtx,
+	"deref":            derefInt32,
+	"add":              func(a, b int) int { return a + b },
+	"sub":              func(a, b int) int { return a - b },
 }).ParseFS(templatesFS, "templates/*.html.tmpl"))
 
 // badgeClass maps a CR phase/status string to the CSS class used to color
 // its status badge.
 func badgeClass(phase string) string {
 	switch phase {
-	case "Succeeded", "Ready":
+	case "Succeeded", "Ready", string(vmPowerRunning):
 		return "ok"
 	case "Failed":
 		return "fail"
@@ -54,9 +56,46 @@ func consoleHref(c consoleTarget) string {
 	return "/console.html?ns=" + c.Namespace + "&vmi=" + c.VMI + "&name=" + c.VMName
 }
 
-// vmConsoleHref builds the /console.html link for a cloneVMView.
-func vmConsoleHref(v cloneVMView) string {
-	return consoleHref(consoleTarget{VMName: v.VMName, Namespace: v.Namespace, VMI: v.VMI})
+// cloneConsoleHref builds the /console.html link for a clone VM, additionally
+// tagging it with the owning clone + VM name so the console page knows to
+// show power controls for it (unlike a build VM's plain console link).
+func cloneConsoleHref(cloneName string, v cloneVMView) string {
+	return consoleHref(consoleTarget{VMName: v.VMName, Namespace: v.Namespace, VMI: v.VMI}) + "&clone=" + cloneName + "&vm=" + v.VMName
+}
+
+// clonePowerWidget builds the "power-widget" template's data for one clone
+// VM row on the clone card. TargetID is unique per clone+VM (unlike
+// console.html's fixed "power" id) since a card can show several VMs across
+// several clones at once, each needing its own swap target.
+func clonePowerWidget(cloneName string, v cloneVMView) powerWidgetView {
+	return powerWidgetView{
+		CloneName: cloneName,
+		VMName:    v.VMName,
+		Phase:     v.Phase,
+		TargetID:  "vm-power-" + cloneName + "-" + v.VMName,
+	}
+}
+
+// pagerCtx builds the "pager-oob" template's data.
+func pagerCtx(container, endpoint string, page, totalPages int) pagerView {
+	return pagerView{Container: container, Endpoint: endpoint, Page: page, TotalPages: totalPages}
+}
+
+type pagerView struct {
+	Container  string
+	Endpoint   string
+	Page       int
+	TotalPages int
+}
+
+// powerWidgetView is the "power-widget" template's data: one clone VM's live
+// power phase, the clone/VM names its start/stop buttons act on, and the id
+// of the element those buttons re-render into.
+type powerWidgetView struct {
+	CloneName string
+	VMName    string
+	Phase     string
+	TargetID  string
 }
 
 func derefInt32(p *int32) int32 {
@@ -74,9 +113,9 @@ type oobStatus struct {
 }
 
 // renderFragment writes a single named template as the entire HTML response.
-func (s *Server) renderFragment(w http.ResponseWriter, status int, name string, data any) {
+func (s *Server) renderFragment(w http.ResponseWriter, name string, data any) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(status)
+	w.WriteHeader(http.StatusOK)
 	if err := uiTemplates.ExecuteTemplate(w, name, data); err != nil {
 		s.log.Error("rendering fragment", "template", name, "error", err)
 	}

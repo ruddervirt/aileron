@@ -41,15 +41,15 @@ func TestUIBuildsFragmentHasStableIDs(t *testing.T) {
 	build := &v1alpha1.VirtualMachineBuild{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-simple", Namespace: "ruddervirt-system"},
 		Status: v1alpha1.VirtualMachineBuildStatus{
-			Phase:          "Succeeded",
+			Phase:          testPhaseSucceeded,
 			BuildID:        "vm-abc123",
 			BuildNamespace: "vm-abc123",
 			VMStatuses: []v1alpha1.VMBuildStatus{{
 				Name:   "builder",
-				Phase:  "Succeeded",
+				Phase:  testPhaseSucceeded,
 				VMName: "vm-abc123-builder",
 				ProvisionerResults: []v1alpha1.ProvisionerResult{
-					{Index: 0, Type: "shell", Name: "hello", Status: "Succeeded", Duration: &metav1.Duration{Duration: 3 * time.Second}},
+					{Index: 0, Type: "shell", Name: "hello", Status: testPhaseSucceeded, Duration: &metav1.Duration{Duration: 3 * time.Second}},
 				},
 			}},
 		},
@@ -327,7 +327,16 @@ func TestUIBuildsFragmentHidesConsoleWhenNotRunning(t *testing.T) {
 // TestUIClonesPanelShowsPowerControls checks the clones panel renders a
 // console link + stop button for a running clone VM, and a start button (no
 // console link) for a stopped one.
-func TestUIClonesPanelShowsPowerControls(t *testing.T) {
+func TestUIClonesPanelShowsPhaseAndConsoleLinks(t *testing.T) {
+	build := &v1alpha1.VirtualMachineBuild{
+		ObjectMeta: metav1.ObjectMeta{Name: "module", Namespace: "ruddervirt-system"},
+		Spec: v1alpha1.VirtualMachineBuildSpec{
+			VMs: []v1alpha1.BuildVM{
+				{Name: "run-vm", Communicator: v1alpha1.BuildCommunicator{SSHUsername: "debian"}},
+				{Name: "stop-vm", Communicator: v1alpha1.BuildCommunicator{SSHUsername: "debian"}},
+			},
+		},
+	}
 	clone := &v1alpha1.VirtualMachineClone{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-clone", Namespace: "ruddervirt-system"},
 		Spec:       v1alpha1.VirtualMachineCloneSpec{TemplateName: "module"},
@@ -340,7 +349,7 @@ func TestUIClonesPanelShowsPowerControls(t *testing.T) {
 			},
 		},
 	}
-	ts := newTestServer(t, clone, runningVMI("ns-abc123", "run-vm"))
+	ts := newTestServer(t, build, clone, runningVMI("ns-abc123", "run-vm"))
 	defer ts.Close()
 
 	resp, err := http.Get(ts.URL + "/ui/clones")
@@ -351,28 +360,43 @@ func TestUIClonesPanelShowsPowerControls(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	html := string(body)
 
+	// No start/stop buttons in the clone card any more — those moved to the
+	// console page — but a console link (tagged with clone+vm) is always
+	// present so an operator can reach the console page to start a stopped
+	// VM, and each VM shows its live phase.
 	for _, want := range []string{
-		`href="/console.html?ns=ns-abc123&amp;vmi=run-vm&amp;name=run-vm"`,
-		`hx-post="/ui/clones/test-clone/vms/run-vm/stop?page=1"`,
-		`hx-post="/ui/clones/test-clone/vms/stop-vm/start?page=1"`,
+		`href="/console.html?ns=ns-abc123&amp;vmi=run-vm&amp;name=run-vm&amp;clone=test-clone&amp;vm=run-vm"`,
+		`href="/console.html?ns=ns-abc123&amp;vmi=stop-vm&amp;name=stop-vm&amp;clone=test-clone&amp;vm=stop-vm"`,
+		`<span class="badge ok">Running</span>`,
+		`<span class="badge warn">Stopped</span>`,
+		"name: run-vm",
+		"name: stop-vm",
+		"user: debian",
+		"namespace: ns-abc123",
+		"commands: []",
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("fragment missing %q\nfull body:\n%s", want, html)
 		}
 	}
-	if strings.Contains(html, "vmi=stop-vm") {
-		t.Errorf("fragment has a console link for the stopped VM: %s", html)
+	for _, want := range []string{
+		`hx-post="/ui/clones/test-clone/vms/run-vm/stop?target=vm-power-test-clone-run-vm"`,
+		`hx-post="/ui/clones/test-clone/vms/stop-vm/start?target=vm-power-test-clone-stop-vm"`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("fragment missing %q (start/stop buttons belong on the clone card too, not just the console page)\nfull body:\n%s", want, html)
+		}
 	}
 }
 
 // TestUIStartCloneVM checks the start action patches the target VM's
-// spec.runStrategy to Always.
+// spec.runStrategy to Always and renders the power widget.
 func TestUIStartCloneVM(t *testing.T) {
 	clone := &v1alpha1.VirtualMachineClone{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-clone", Namespace: "ruddervirt-system"},
 		Status:     v1alpha1.VirtualMachineCloneStatus{CloneNamespace: "ns-abc123"},
 	}
-	ts, c := newTestServerAndClient(t, clone, stoppedVM("ns-abc123", "run-vm"))
+	ts, c := newTestServerAndClient(t, clone, stoppedVM("run-vm"))
 	defer ts.Close()
 
 	resp, err := http.Post(ts.URL+"/ui/clones/test-clone/vms/run-vm/start", "", nil)
@@ -384,6 +408,12 @@ func TestUIStartCloneVM(t *testing.T) {
 		body, _ := io.ReadAll(resp.Body)
 		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, body)
 	}
+	body, _ := io.ReadAll(resp.Body)
+	// The VM is now desired-running but has no VMI yet: "Starting", not
+	// "Running" — the whole point of the phase split.
+	if !strings.Contains(string(body), "Starting") {
+		t.Errorf("body = %q, want the Starting phase immediately after start", body)
+	}
 
 	var vm unstructured.Unstructured
 	vm.SetGroupVersionKind(schema.GroupVersionKind{Group: "kubevirt.io", Version: "v1", Kind: "VirtualMachine"})
@@ -391,8 +421,74 @@ func TestUIStartCloneVM(t *testing.T) {
 		t.Fatal(err)
 	}
 	strategy, _, _ := unstructured.NestedString(vm.Object, "spec", "runStrategy")
-	if strategy != "Always" {
+	if strategy != testRunStrategyAlways {
 		t.Errorf("runStrategy = %q, want Always", strategy)
+	}
+}
+
+// TestUICloneVMPowerPhases checks the power-status endpoint reports all four
+// phases correctly, including the transitional Starting/Stopping states a
+// plain VMI-running check would miss.
+func TestUICloneVMPowerPhases(t *testing.T) {
+	clone := &v1alpha1.VirtualMachineClone{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-clone", Namespace: "ruddervirt-system"},
+		Status:     v1alpha1.VirtualMachineCloneStatus{CloneNamespace: "ns-abc123"},
+	}
+
+	runningVM := stoppedVM("running-vm")
+	_ = unstructured.SetNestedField(runningVM.Object, testRunStrategyAlways, "spec", "runStrategy")
+
+	stoppingVM := stoppedVM("stopping-vm") // runStrategy Halted, but VMI still tearing down
+
+	ts := newTestServer(t, clone,
+		runningVM, runningVMI("ns-abc123", "running-vm"),
+		stoppedVM("stopped-vm"), // Halted, no VMI
+		stoppingVM, vmiWithPhase("ns-abc123", "stopping-vm", "Scheduled"),
+	)
+	defer ts.Close()
+
+	for vm, want := range map[string]string{
+		"running-vm":  testPhaseRunning,
+		"stopped-vm":  "Stopped",
+		"stopping-vm": "Stopping",
+	} {
+		resp, err := http.Get(ts.URL + "/ui/clones/test-clone/vms/" + vm + "/power")
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if !strings.Contains(string(body), want) {
+			t.Errorf("power(%s) = %q, want it to contain %q", vm, body, want)
+		}
+	}
+}
+
+// TestUIConsolePageShowsPowerWidgetOnlyForClones checks the console page
+// includes the power widget div when reached via a clone VM's console link
+// (clone+vm query params), and omits it for a plain build console link.
+func TestUIConsolePageShowsPowerWidgetOnlyForClones(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/console.html?ns=ns-1&vmi=vm-1&name=vm-1&clone=my-clone&vm=vm-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if !strings.Contains(string(body), `hx-get="/ui/clones/my-clone/vms/vm-1/power"`) {
+		t.Errorf("clone console page missing power widget: %s", body)
+	}
+
+	resp2, err := http.Get(ts.URL + "/console.html?ns=ns-1&vmi=vm-1&name=vm-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body2, _ := io.ReadAll(resp2.Body)
+	_ = resp2.Body.Close()
+	if strings.Contains(string(body2), `id="power"`) {
+		t.Errorf("build console page should have no power widget: %s", body2)
 	}
 }
 
@@ -430,8 +526,8 @@ func TestUIBuildsSortedAndPaginated(t *testing.T) {
 	if strings.Contains(html, `id="build-`+fmtBuildName(1)+`"`) {
 		t.Errorf("page 1 should not contain the oldest build (past uiPageSize): %s", html)
 	}
-	if !strings.Contains(html, "page 1 / 2") {
-		t.Errorf("missing pager text 'page 1 / 2': %s", html)
+	if !strings.Contains(html, `id="builds-pager" class="pager-inline" hx-swap-oob="true">`) || !strings.Contains(html, `<span class="page-info">1/2</span>`) {
+		t.Errorf("missing out-of-band pager showing page 1/2: %s", html)
 	}
 
 	resp2, err := http.Get(ts.URL + "/ui/builds?page=2")
