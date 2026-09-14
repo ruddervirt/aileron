@@ -24,7 +24,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -o ma
  && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -o grader cmd/grader/main.go
 
 # Aileron runtime
-FROM gcr.io/distroless/static:nonroot@sha256:1c2c046bc09ed40fad370b599a0b1ae7987f55b01e247cf27a7c27cd97e5bbc7 AS manager
+FROM gcr.io/distroless/static:nonroot@sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3 AS manager
 LABEL org.opencontainers.image.source="https://github.com/ruddervirt/aileron"
 WORKDIR /
 COPY --from=builder /workspace/manager .
@@ -34,14 +34,14 @@ ENTRYPOINT ["/manager"]
 
 # Grader worker — aileron core (runs in per-VM grading Jobs scheduled by the
 # GradeRequest reconciler; connects to the VM's KubeVirt serial console).
-FROM gcr.io/distroless/static:nonroot@sha256:1c2c046bc09ed40fad370b599a0b1ae7987f55b01e247cf27a7c27cd97e5bbc7 AS grader
+FROM gcr.io/distroless/static:nonroot@sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3 AS grader
 LABEL org.opencontainers.image.source="https://github.com/ruddervirt/aileron"
 COPY --from=builder /workspace/grader /grader
 USER 65532:65532
 ENTRYPOINT ["/grader"]
 
 # VNC bridge — aileron core (TCP <-> KubeVirt VNC WebSocket tunnels for guacd)
-FROM gcr.io/distroless/static:nonroot@sha256:1c2c046bc09ed40fad370b599a0b1ae7987f55b01e247cf27a7c27cd97e5bbc7 AS vncgateway
+FROM gcr.io/distroless/static:nonroot@sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3 AS vncgateway
 LABEL org.opencontainers.image.source="https://github.com/ruddervirt/aileron"
 COPY --from=builder /workspace/vncgateway /vncgateway
 USER 65532:65532
@@ -49,14 +49,14 @@ ENTRYPOINT ["/vncgateway"]
 
 # aileron-ui — basic web interface (builds/clones submission, status, consoles).
 # Static frontend assets are embedded in the binary via go:embed.
-FROM gcr.io/distroless/static:nonroot@sha256:1c2c046bc09ed40fad370b599a0b1ae7987f55b01e247cf27a7c27cd97e5bbc7 AS aileron-ui
+FROM gcr.io/distroless/static:nonroot@sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3 AS aileron-ui
 LABEL org.opencontainers.image.source="https://github.com/ruddervirt/aileron"
 COPY --from=builder /workspace/aileron-ui /aileron-ui
 USER 65532:65532
 ENTRYPOINT ["/aileron-ui"]
 
 # Coordinator (boot commands + provisioning)
-FROM gcr.io/distroless/static:nonroot@sha256:1c2c046bc09ed40fad370b599a0b1ae7987f55b01e247cf27a7c27cd97e5bbc7 AS coordinator
+FROM gcr.io/distroless/static:nonroot@sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3 AS coordinator
 LABEL org.opencontainers.image.source="https://github.com/ruddervirt/aileron"
 COPY --from=builder /workspace/coordinator /coordinator
 USER 65532:65532
