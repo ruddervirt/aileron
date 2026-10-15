@@ -526,8 +526,20 @@ func (r *VirtualMachineBuildReconciler) handleDeletion(ctx context.Context, vmBu
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
+	// Strip the finalizer with a metadata-only patch, never a full Update.
+	// An Update round-trips the whole object through the Go types, which
+	// materializes zero values for fields the stored object never had (e.g.
+	// subnets[].cidr: "" on builds created before cidr was required). The API
+	// server sees those as *changed* fields, so CRD validation ratcheting no
+	// longer exempts them and the write is rejected — leaving a fully
+	// cleaned-up CR stuck Terminating forever. A patch that only touches
+	// metadata.finalizers leaves the stored spec byte-for-byte as it was, so
+	// removal never depends on legacy data validating against the current
+	// schema. The optimistic lock turns a concurrent write into a conflict
+	// (retried on the next reconcile) instead of a silent clobber.
+	base := vmBuild.DeepCopy()
 	controllerutil.RemoveFinalizer(vmBuild, finalizerName)
-	if err := r.Update(ctx, vmBuild); err != nil {
+	if err := r.Patch(ctx, vmBuild, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 		return ctrl.Result{}, fmt.Errorf("removing finalizer: %w", err)
 	}
 
