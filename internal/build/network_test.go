@@ -177,6 +177,99 @@ func TestBuildVMBindingUnmanagedOverriddenManaged(t *testing.T) {
 	}
 }
 
+// TestInternetEgressSubnets_OverrideManagedIsEligible is the regression guard
+// for build-time NAT on a secondary VPC whose only subnet is base-unmanaged
+// but overridden managed for the build (the phonebook shape: pfSense-style
+// segment that is guest-served at runtime, provisioned with a router VM in
+// front of it). The egress gateway selection used the raw base-spec unmanaged
+// flag, so the subnet was skipped even though it was realized managed (OVN
+// DHCP/IPAM on) — the VPC then showed internet-shaped DHCP options but had no
+// VpcEgressGateway and no VPC default route, and raw TCP egress through the
+// gateway failed while apt could never reach the mirrors.
+func TestInternetEgressSubnets_OverrideManagedIsEligible(t *testing.T) {
+	build := &v1alpha1.VirtualMachineBuild{
+		ObjectMeta: metav1.ObjectMeta{Name: "phonebook", Namespace: "ruddervirt-system"},
+		Spec: v1alpha1.VirtualMachineBuildSpec{
+			Network: &v1alpha1.Network{
+				VPCs:    []v1alpha1.VPC{{Name: "private", Internet: false}},
+				Subnets: []v1alpha1.Subnet{{Name: "lan", VPC: "private", CIDR: "192.168.1.0/24", Unmanaged: true}},
+			},
+			BuildOverrides: &v1alpha1.BuildOverrides{
+				VPCs:    []v1alpha1.VPCOverride{{Name: "private", Internet: new(true)}},
+				Subnets: []v1alpha1.SubnetOverride{{Name: "lan", Unmanaged: new(false)}},
+			},
+		},
+	}
+
+	names, first := internetEgressSubnets(build, build.Spec.Network.VPCs[0], build.Spec.Network.Subnets, "vm-test1")
+
+	if len(names) != 1 || names[0] != "vm-test1-lan-subnet" {
+		t.Errorf("egress subnets = %v, want [vm-test1-lan-subnet] (override-managed subnet must host the gateway)", names)
+	}
+	if first != "vm-test1-lan-subnet" {
+		t.Errorf("firstSubnet = %q, want vm-test1-lan-subnet", first)
+	}
+}
+
+// TestInternetEgressSubnets_BaseUnmanagedStillSkipped pins the skip path: a
+// truly unmanaged subnet (no override) excludes its usable range from OVN
+// IPAM, so the gateway pod could never allocate an internal IP there. A VPC
+// whose only subnets are unmanaged must yield no gateway rather than wedge
+// the build in Networking forever.
+func TestInternetEgressSubnets_BaseUnmanagedStillSkipped(t *testing.T) {
+	build := &v1alpha1.VirtualMachineBuild{
+		ObjectMeta: metav1.ObjectMeta{Name: "pfsense", Namespace: "ruddervirt-system"},
+		Spec: v1alpha1.VirtualMachineBuildSpec{
+			Network: &v1alpha1.Network{
+				VPCs:    []v1alpha1.VPC{{Name: "lab", Internet: true}},
+				Subnets: []v1alpha1.Subnet{{Name: "guest-lan", VPC: "lab", CIDR: "10.0.1.0/28", Unmanaged: true}},
+			},
+		},
+	}
+
+	names, first := internetEgressSubnets(build, build.Spec.Network.VPCs[0], build.Spec.Network.Subnets, "vm-test1")
+
+	if len(names) != 0 {
+		t.Errorf("egress subnets = %v, want none (unmanaged subnet has no OVN IPAM)", names)
+	}
+	if first != "" {
+		t.Errorf("firstSubnet = %q, want empty", first)
+	}
+}
+
+// TestInternetEgressSubnets_ManagedPlusWrongVPC asserts the eligibility
+// filter: managed subnets of the VPC are included in declaration order while
+// subnets owned by other VPCs (even managed ones) are not.
+func TestInternetEgressSubnets_ManagedPlusWrongVPC(t *testing.T) {
+	build := &v1alpha1.VirtualMachineBuild{
+		ObjectMeta: metav1.ObjectMeta{Name: "multi", Namespace: "ruddervirt-system"},
+		Spec: v1alpha1.VirtualMachineBuildSpec{
+			Network: &v1alpha1.Network{
+				VPCs: []v1alpha1.VPC{
+					{Name: "uplink", Internet: true},
+					{Name: "private", Internet: false},
+				},
+				Subnets: []v1alpha1.Subnet{
+					{Name: "uplink", VPC: "uplink", CIDR: "10.0.1.0/24"},
+					{Name: "lan", VPC: "private", CIDR: "192.168.1.0/24"},
+					{Name: "mgmt", VPC: "uplink", CIDR: "10.0.2.0/24"},
+				},
+			},
+		},
+	}
+
+	uplink := build.Spec.Network.VPCs[0]
+	names, first := internetEgressSubnets(build, uplink, build.Spec.Network.Subnets, "vm-test1")
+
+	want := []string{"vm-test1-uplink-subnet", "vm-test1-mgmt-subnet"}
+	if len(names) != len(want) || names[0] != want[0] || names[1] != want[1] {
+		t.Errorf("egress subnets = %v, want %v", names, want)
+	}
+	if first != "vm-test1-uplink-subnet" {
+		t.Errorf("firstSubnet = %q, want vm-test1-uplink-subnet", first)
+	}
+}
+
 func TestBuildVPCName(t *testing.T) {
 	got := buildVPCName("vm-abc123", "public")
 	if got != "vm-abc123-public-vpc" {

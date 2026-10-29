@@ -160,23 +160,18 @@ func (n *NetworkSetup) Handle(ctx context.Context, build *v1alpha1.VirtualMachin
 		gwName := vpcName + "-egress"
 
 		// The egress gateway pod auto-allocates an IP from each attached
-		// subnet's OVN IPAM. Unmanaged subnets exclude their entire usable
-		// range from IPAM (guest owns DHCP), so the gateway can't get an
-		// IP there - skip them. If a VPC's only subnets are unmanaged,
-		// the gateway can't be created; log and move on rather than wedge
-		// the build in Networking forever.
-		var vpcSubnetNames []string
-		var firstSubnet string
-		for _, subnet := range subnets {
-			if subnet.VPC != vpc.Name || subnet.Unmanaged {
-				continue
-			}
-			subnetName := buildSubnetName(buildID, subnet.Name)
-			vpcSubnetNames = append(vpcSubnetNames, subnetName)
-			if firstSubnet == "" {
-				firstSubnet = subnetName
-			}
-		}
+		// subnet's OVN IPAM. Effective-unmanaged subnets exclude their
+		// entire usable range from IPAM (guest owns DHCP), so the gateway
+		// can't get an IP there - skip them. Uses the effective
+		// (buildOverride-aware) flag: a segment overridden managed for the
+		// build keeps its IPAM and thus CAN host the gateway — with the raw
+		// base-spec flag a base-unmanaged/override-managed VPC's only subnet
+		// was skipped, so the VPC got no egress gateway and build-time NAT
+		// fell dead even though the override was honored at the
+		// DHCP/natOutgoing layer. If a VPC's only subnets are
+		// effective-unmanaged, the gateway can't be created; log and move
+		// on rather than wedge the build in Networking forever.
+		vpcSubnetNames, firstSubnet := internetEgressSubnets(build, vpc, subnets, buildID)
 		if len(vpcSubnetNames) == 0 {
 			logger.Info("VPC has internet=true but no managed subnets for egress gateway; skipping", "vpc", vpc.Name)
 			continue
@@ -224,6 +219,32 @@ func (n *NetworkSetup) Handle(ctx context.Context, build *v1alpha1.VirtualMachin
 	build.Status.Network.Ready = true
 	logger.Info("All network resources are ready")
 	return v1alpha1.BuildPhaseBuilding, nil
+}
+
+// internetEgressSubnets returns the managed subnets of an internet-enabled
+// VPC that can host the VpcEgressGateway pod, plus the first such subnet's
+// built name (used as the gateway's internalSubnet). Eligibility follows the
+// effective (buildOverride-aware) unmanaged flag, mirroring how the subnet
+// itself is realized: a base-unmanaged subnet overridden managed for the
+// build is built with OVN DHCP/IPAM and so can also back the gateway. A
+// buildOverride that flips a VPC's internet on *and* one of its subnets
+// managed is the shape that previously produced a VPC with a gateway-less
+// dead end (see Handle). An empty result means the VPC cannot host a
+// gateway on any of its subnets.
+func internetEgressSubnets(build *v1alpha1.VirtualMachineBuild, vpc v1alpha1.VPC, subnets []v1alpha1.Subnet, buildID string) ([]string, string) {
+	var vpcSubnetNames []string
+	var firstSubnet string
+	for _, subnet := range subnets {
+		if subnet.VPC != vpc.Name || effectiveSubnetUnmanaged(build, subnet.Name) {
+			continue
+		}
+		subnetName := buildSubnetName(buildID, subnet.Name)
+		vpcSubnetNames = append(vpcSubnetNames, subnetName)
+		if firstSubnet == "" {
+			firstSubnet = subnetName
+		}
+	}
+	return vpcSubnetNames, firstSubnet
 }
 
 // buildVPCName returns the KubeOVN VPC resource name for a build.
