@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 
 # Build the manager binary
-FROM golang:1.26.10@sha256:670bb5aa5349ae03b8516764718486f4f16399134bdc9acd0c46a23f043ab05c AS builder
+FROM golang:1.26.10@sha256:cfa27959837144bf4649802ba38e59daffd0dd2a7994aa83daaf113285b0f551 AS builder
 WORKDIR /workspace
 
 # Cache dependencies
@@ -63,13 +63,13 @@ USER 65532:65532
 ENTRYPOINT ["/coordinator"]
 
 # Egress bridge helper
-FROM alpine:3.21@sha256:ee16d92f96db08d9d2d07da48555a27f3a69d8f0759021dbc601195ed0d2b5bd AS egress-bridge
+FROM alpine:3.21@sha256:bc21487101ae47172509130ee1092cc273a831968d64b617776d1f69c81e42ab AS egress-bridge
 LABEL org.opencontainers.image.source="https://github.com/ruddervirt/aileron"
 RUN apk add --no-cache iproute2 iptables wireguard-tools
 ENTRYPOINT ["/bin/sh"]
 
 # Build helper (disk image creation, etc.)
-FROM alpine:3.21@sha256:ee16d92f96db08d9d2d07da48555a27f3a69d8f0759021dbc601195ed0d2b5bd AS helper
+FROM alpine:3.21@sha256:bc21487101ae47172509130ee1092cc273a831968d64b617776d1f69c81e42ab AS helper
 LABEL org.opencontainers.image.source="https://github.com/ruddervirt/aileron"
 RUN apk add --no-cache mtools dosfstools cdrkit
 ENTRYPOINT ["/bin/sh"]
