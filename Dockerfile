@@ -75,6 +75,6 @@ RUN apk add --no-cache mtools dosfstools cdrkit
 ENTRYPOINT ["/bin/sh"]
 
 # KubeVirt sidecar hook (EFI firmware + floppy device injection)
-FROM quay.io/kubevirt/sidecar-shim:v1.4.0@sha256:cb4025f7275f8de2891c2195c5faf128ac1b68595cdb3eff776a2e5360b8f034 AS sidecar
+FROM quay.io/kubevirt/sidecar-shim:v1.9.1@sha256:d48c6af64305c28de7e9a5509a11737b115cc0193f57f2a0f42faff85bebe5cd AS sidecar
 LABEL org.opencontainers.image.source="https://github.com/ruddervirt/aileron"
 COPY --from=builder /workspace/onDefineDomain /usr/bin/onDefineDomain
