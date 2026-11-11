@@ -8,6 +8,10 @@ import (
 	"path/filepath"
 	"testing"
 
+	v1alpha1 "github.com/ruddervirt/aileron/api/v1alpha1"
+	"k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -16,7 +20,8 @@ import (
 )
 
 var (
-	dynClient dynamic.Interface
+	dynClient  dynamic.Interface
+	kubeClient client.Client
 
 	buildGVR = schema.GroupVersionResource{
 		Group: "ruddervirt.io", Version: "v1alpha1", Resource: "virtualmachinebuilds",
@@ -38,6 +43,13 @@ func TestMain(m *testing.M) {
 	dynClient, err = dynamic.NewForConfig(config)
 	if err != nil {
 		panic("failed to create client: " + err.Error())
+	}
+	if err := v1alpha1.AddToScheme(scheme.Scheme); err != nil {
+		panic(err)
+	}
+	kubeClient, err = client.New(config, client.Options{Scheme: scheme.Scheme})
+	if err != nil {
+		panic("failed to create typed client: " + err.Error())
 	}
 	os.Exit(m.Run())
 }

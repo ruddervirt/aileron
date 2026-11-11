@@ -152,7 +152,7 @@ For common cases, omit `network` or `nics`. Auto-creation covers a VPC, subnet, 
 
 **Invisible VMs** — `spec.vms[].invisible` (default `false`) hides a VM from the console/UI but doesn't affect grading or networking. Clones inherit invisibility; they can't change it.
 
-**Files** (`spec.files[]`) — named blobs (`inline` or `url`) referenced by `httpDirectory`, `floppy`, or a `file` provisioner's `fileRef`. `name` serves as filename/URL path, so use specific names (e.g. `"Autounattend.xml"`, `"preseed.cfg"`).
+**Files** (`spec.files[]`) — named blobs (`inline` or `url`) referenced by `httpDirectory`, `floppy`, or a `file` provisioner's `fileRef`. `name` serves as filename/URL path, so use specific names (e.g. `"Autounattend.xml"`, `"preseed.cfg"`). Names must be unique and each file must have exactly one non-empty `inline` or `url` value. All named-file references must resolve within this build's `spec.files`; files are not inherited from a `buildRef` parent. Invalid definitions or references fail the build with the offending field and filename before network/relay resources are created (also checked for builds already in `Building`). Relay startup waits are reported in `status.message` and cleared when the relay becomes ready.
 
 <a id="build-overrides"></a>
 **Build Overrides** (`spec.buildOverrides`) — settings for the build phase only; base spec values go into the template and are used by clones. Useful when build needs differ from what clones require:

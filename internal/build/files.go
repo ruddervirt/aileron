@@ -521,6 +521,55 @@ func IsFloppyCleanupReady(ctx context.Context, k8sClient client.Client, build *v
 	return false, nil
 }
 
+// ValidateFiles checks named file definitions and references before any build
+// resources are created. These references are local to this build, not inherited
+// from a buildRef parent.
+func ValidateFiles(build *v1alpha1.VirtualMachineBuild) error {
+	seen := make(map[string]bool, len(build.Spec.Files))
+	for i, f := range build.Spec.Files {
+		if f.Name == "" {
+			return fmt.Errorf("spec.files[%d].name must not be empty", i)
+		}
+		if seen[f.Name] {
+			return fmt.Errorf("spec.files[%d]: duplicate file name %q", i, f.Name)
+		}
+		seen[f.Name] = true
+		if (f.Inline != "") == (f.URL != "") {
+			return fmt.Errorf("spec.files[%d] (%q): exactly one of inline or url must be set", i, f.Name)
+		}
+	}
+	check := func(path, name string) error {
+		if _, err := ResolveFile(build, name); err != nil {
+			return fmt.Errorf("%s: %w", path, err)
+		}
+		return nil
+	}
+	if build.Spec.HttpDirectory != nil {
+		for i, ref := range build.Spec.HttpDirectory.Files {
+			if err := check(fmt.Sprintf("spec.httpDirectory.files[%d]", i), ref.Name); err != nil {
+				return err
+			}
+		}
+	}
+	for i, vm := range build.Spec.VMs {
+		if vm.Floppy != nil {
+			for j, ref := range vm.Floppy.Files {
+				if err := check(fmt.Sprintf("spec.vms[%d] (%s).floppy.files[%d]", i, vm.Name, j), ref.Name); err != nil {
+					return err
+				}
+			}
+		}
+		for j, step := range vm.Provisioners {
+			if step.File != nil && step.File.FileRef != "" {
+				if err := check(fmt.Sprintf("spec.vms[%d] (%s).provisioners[%d].file.fileRef", i, vm.Name, j), step.File.FileRef); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
 // ResolveFile finds a BuildFile by name in the build spec.
 func ResolveFile(build *v1alpha1.VirtualMachineBuild, name string) (*v1alpha1.BuildFile, error) {
 	for i := range build.Spec.Files {

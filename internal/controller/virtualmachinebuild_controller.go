@@ -403,6 +403,7 @@ func (r *VirtualMachineBuildReconciler) Reconcile(ctx context.Context, req ctrl.
 		copy(oldVMStatuses[i].ProvisionerResults, vs.ProvisionerResults)
 	}
 
+	oldMessage := vmBuild.Status.Message
 	nextPhase, err := sm.Step(ctx, vmBuild)
 	if err != nil {
 		logger.Error(err, "Phase handler error", "phase", vmBuild.Status.Phase)
@@ -429,7 +430,7 @@ func (r *VirtualMachineBuildReconciler) Reconcile(ctx context.Context, req ctrl.
 	}
 
 	// Check if status actually changed.
-	statusChanged := phaseChanged
+	statusChanged := phaseChanged || vmBuild.Status.Message != oldMessage
 	if !statusChanged {
 		if len(vmBuild.Status.VMStatuses) != len(oldVMStatuses) {
 			statusChanged = true
@@ -1216,6 +1217,9 @@ func (h *pendingHandler) Handle(ctx context.Context, vmBuild *v1alpha1.VirtualMa
 			}
 		}
 	}
+	if err := build.ValidateFiles(vmBuild); err != nil {
+		return v1alpha1.BuildPhaseFailed, err
+	}
 	// All VMs are automatically captured — no output validation needed.
 
 	// Create the VirtualMachineNamespace CR if it doesn't exist.
@@ -1443,6 +1447,12 @@ type buildingHandler struct {
 //nolint:gocyclo // per-VM state machine with many phase transitions
 func (h *buildingHandler) Handle(ctx context.Context, vmBuild *v1alpha1.VirtualMachineBuild) (v1alpha1.BuildPhase, error) {
 	logger := logf.FromContext(ctx)
+
+	// Revalidate here as well so already-Building CRs from older controllers
+	// fail with the actual manifest error rather than waiting for a timeout.
+	if err := build.ValidateFiles(vmBuild); err != nil {
+		return v1alpha1.BuildPhaseFailed, err
+	}
 
 	// Materialize spec.files into a ConfigMap before creating the relay pod or VMs.
 	if err := build.EnsureFilesConfigMap(ctx, h.client, vmBuild); err != nil {
