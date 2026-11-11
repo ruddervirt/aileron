@@ -63,13 +63,13 @@ USER 65532:65532
 ENTRYPOINT ["/coordinator"]
 
 # Egress bridge helper
-FROM alpine:3.21@sha256:bc21487101ae47172509130ee1092cc273a831968d64b617776d1f69c81e42ab AS egress-bridge
+FROM alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf AS egress-bridge
 LABEL org.opencontainers.image.source="https://github.com/ruddervirt/aileron"
 RUN apk add --no-cache iproute2 iptables wireguard-tools
 ENTRYPOINT ["/bin/sh"]
 
 # Build helper (disk image creation, etc.)
-FROM alpine:3.21@sha256:bc21487101ae47172509130ee1092cc273a831968d64b617776d1f69c81e42ab AS helper
+FROM alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf AS helper
 LABEL org.opencontainers.image.source="https://github.com/ruddervirt/aileron"
 RUN apk add --no-cache mtools dosfstools cdrkit
 ENTRYPOINT ["/bin/sh"]
