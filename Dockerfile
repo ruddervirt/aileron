@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 
 # Build the manager binary
-FROM golang:1.26.10@sha256:cfa27959837144bf4649802ba38e59daffd0dd2a7994aa83daaf113285b0f551 AS builder
+FROM golang:1.27.4@sha256:5e8afd493a7124a8586e134d9b532731161d4b9becf9dee5a5956b107426f93d AS builder
 WORKDIR /workspace
 
 # Cache dependencies
