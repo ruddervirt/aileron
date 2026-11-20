@@ -26,9 +26,9 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -273,6 +273,15 @@ func (r *GradeRequestReconciler) resolveGradeMethod(ctx context.Context, namespa
 // gradeVMIsOff reports whether a VMI phase represents a powered-off VM. A
 // missing VMI ("") means the VM is stopped; Succeeded/Failed VMIs linger after
 // a guest shutdown until the VM is started again.
+// kubevirtStateConflict reports a 409 from start/stop that reflects VM state
+// ("VM is already running", "VM is not running"), as opposed to the retryable
+// patch race ("jsonpatch test operation does not apply"). A state conflict is
+// not an error by itself: callers re-read the VMI phase and decide from it.
+func kubevirtStateConflict(err error) bool {
+	return apierrors.IsConflict(err) &&
+		!strings.Contains(err.Error(), "jsonpatch test operation does not apply")
+}
+
 func gradeVMIsOff(vmiPhase string) bool {
 	switch vmiPhase {
 	case "", "Succeeded", "Failed":
@@ -361,7 +370,9 @@ func (r *GradeRequestReconciler) kubevirtSubresourceAction(ctx context.Context, 
 	restCfg := rest.CopyConfig(r.RESTConfig)
 	restCfg.GroupVersion = &schema.GroupVersion{Group: "subresources.kubevirt.io", Version: "v1"}
 	restCfg.APIPath = "/apis"
-	restCfg.NegotiatedSerializer = serializer.NewCodecFactory(runtime.NewScheme())
+	// The default scheme knows metav1.Status, so non-2xx bodies decode into
+	// *apierrors.StatusError with KubeVirt's reason (e.g. "VM is already running").
+	restCfg.NegotiatedSerializer = clientgoscheme.Codecs.WithoutConversion()
 
 	restClient, err := rest.RESTClientFor(restCfg)
 	if err != nil {
@@ -632,6 +643,16 @@ func (r *GradeRequestReconciler) driveGradeVM(ctx context.Context, gr *v1alpha1.
 	// Powered-off VM: boot it and grade once it has had time to come up.
 	if gradeVMIsOff(phase) && vmStatus.BootStartedAt == nil {
 		if err := r.powerOnVM(ctx, gr.Spec.Namespace, vm.Name); err != nil {
+			// 409: someone started the VM between our phase read and the start
+			// call (state conflict), or a concurrent spec patch raced us. Either
+			// way the VM is not ours to boot-track; requeue and go back through
+			// the phase check. Bounded by the same window a VM we did not boot
+			// gets, measured from request creation.
+			if apierrors.IsConflict(err) && time.Since(gr.CreationTimestamp.Time) <= gradeBootTimeout {
+				log.Info("power-on conflicted, re-checking VMI phase", "gradeRequest", gr.Name, "vm", vm.Name, "reason", err.Error())
+				vmStatus.Message = "VM start already in progress; waiting for Running"
+				return true, nil
+			}
 			vmStatus.Phase = v1alpha1.GradeRequestPhaseFailed
 			vmStatus.Message = fmt.Sprintf("failed to power on VM: %v", err)
 			return false, nil
@@ -836,7 +857,9 @@ func (r *GradeRequestReconciler) handleVMJobFailure(ctx context.Context, gr *v1a
 // running. Returns true when the status changed. Power-off failures are
 // logged, never propagated: the grading result stands on its own, and the
 // Ready/Failed arms of handleRunningPhase retry while the request is in
-// flight.
+// flight. A state 409 ("VM is not running") is resolved from the VMI phase:
+// if the VM is already off the goal is met; otherwise a stop is in flight and
+// we retry. The patch-race 409 stays retryable.
 func (r *GradeRequestReconciler) powerOffIfAutoStarted(ctx context.Context, gr *v1alpha1.GradeRequest, vmStatus *v1alpha1.GradeVMStatus) bool {
 	log := logf.FromContext(ctx)
 	if !vmStatus.AutoStarted || vmStatus.PoweredOff {
@@ -850,6 +873,16 @@ func (r *GradeRequestReconciler) powerOffIfAutoStarted(ctx context.Context, gr *
 		return true
 	}
 	if err := r.powerOffVM(ctx, gr.Spec.Namespace, vmStatus.Name); err != nil {
+		if kubevirtStateConflict(err) {
+			phase, perr := r.vmiPhase(ctx, gr.Spec.Namespace, vmStatus.Name)
+			if perr == nil && gradeVMIsOff(phase) {
+				log.Info("auto-started VM already off after grading", "gradeRequest", gr.Name, "vm", vmStatus.Name, "reason", err.Error())
+				vmStatus.PoweredOff = true
+				return true
+			}
+			log.Info("power-off conflicted while VM not yet off, will retry", "gradeRequest", gr.Name, "vm", vmStatus.Name, "vmiPhase", phase, "reason", err.Error())
+			return false
+		}
 		log.Error(err, "failed to power off auto-started VM after grading", "gradeRequest", gr.Name, "vm", vmStatus.Name)
 		return false
 	}
