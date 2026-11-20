@@ -65,6 +65,10 @@ type VirtualMachineCloneReconciler struct {
 	Client     client.Client
 	Scheme     *runtime.Scheme
 	RESTConfig *rest.Config
+	// APIReader is an uncached reader used where a stale cache read is unsafe (the
+	// owning VirtualMachineNamespace lookup before clone PVCs are created). Nil falls
+	// back to Client.
+	APIReader client.Reader
 
 	// DefaultCloneTTL is the fallback TTL applied when a clone doesn't set
 	// spec.ttl. Zero means "use the built-in defaultCloneTTL" (mirrors
@@ -164,6 +168,22 @@ func (r *VirtualMachineCloneReconciler) handlePending(ctx context.Context, vmClo
 		r.resolveExpiry(ctx, vmClone)
 	}
 
+	if err := r.Client.Create(ctx, cloneVMNS(vmClone)); err != nil && !errors.IsAlreadyExists(err) {
+		return ctrl.Result{}, fmt.Errorf("creating VirtualMachineNamespace: %w", err)
+	}
+
+	vmClone.Status.Phase = v1alpha1.ClonePhaseValidating
+	clonePhaseTransitions.WithLabelValues(string(v1alpha1.ClonePhaseValidating)).Inc()
+	vmClone.Status.Message = "validating template"
+	if err := r.Client.Status().Update(ctx, vmClone); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{Requeue: true}, nil
+}
+
+// cloneVMNS builds the per-clone VirtualMachineNamespace bookkeeping record. It owns
+// the clone's PVCs (see EnsureClonePVC), so the reaper and GC key off it.
+func cloneVMNS(vmClone *v1alpha1.VirtualMachineClone) *v1alpha1.VirtualMachineNamespace {
 	cloneID := vmClone.Status.CloneID
 	vmns := &v1alpha1.VirtualMachineNamespace{}
 	vmns.Name = cloneID
@@ -178,17 +198,7 @@ func (r *VirtualMachineCloneReconciler) handlePending(ctx context.Context, vmClo
 	vmns.Labels = map[string]string{
 		"ruddervirt.io/clone": cloneID,
 	}
-	if err := r.Client.Create(ctx, vmns); err != nil && !errors.IsAlreadyExists(err) {
-		return ctrl.Result{}, fmt.Errorf("creating VirtualMachineNamespace: %w", err)
-	}
-
-	vmClone.Status.Phase = v1alpha1.ClonePhaseValidating
-	clonePhaseTransitions.WithLabelValues(string(v1alpha1.ClonePhaseValidating)).Inc()
-	vmClone.Status.Message = "validating template"
-	if err := r.Client.Status().Update(ctx, vmClone); err != nil {
-		return ctrl.Result{}, err
-	}
-	return ctrl.Result{Requeue: true}, nil
+	return vmns
 }
 
 func (r *VirtualMachineCloneReconciler) handleValidating(ctx context.Context, vmClone *v1alpha1.VirtualMachineClone) (ctrl.Result, error) {
@@ -281,14 +291,25 @@ func (r *VirtualMachineCloneReconciler) handleVolumeProvisioning(ctx context.Con
 	cloneID := vmClone.Status.CloneID
 
 	// The per-clone VirtualMachineNamespace CR owns the clone PVCs so they are
-	// garbage-collected with the clone. It lives in the same namespace as the PVCs
-	// (created in handlePending); a missing owner is non-fatal — PVCs still provision.
+	// garbage-collected with the clone. It is read uncached: a cache that still holds
+	// a just-deleted record would hand back a dead UID, and GC immediately deletes any
+	// PVC owned by a UID that no longer exists. If the record is missing (deleted out
+	// from under an in-progress clone), recreate it and requeue rather than create
+	// unowned PVCs — the next pass picks up the new record's UID.
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
 	owner := &v1alpha1.VirtualMachineNamespace{}
-	if err := r.Client.Get(ctx, types.NamespacedName{Name: cloneID, Namespace: OperatorNamespace()}, owner); err != nil {
+	if err := reader.Get(ctx, types.NamespacedName{Name: cloneID, Namespace: OperatorNamespace()}, owner); err != nil {
 		if !errors.IsNotFound(err) {
 			return ctrl.Result{}, fmt.Errorf("getting owning VirtualMachineNamespace %s: %w", cloneID, err)
 		}
-		owner = nil
+		log.FromContext(ctx).Info("Owning VirtualMachineNamespace missing for in-progress clone; recreating", "vmns", cloneID)
+		if err := r.Client.Create(ctx, cloneVMNS(vmClone)); err != nil && !errors.IsAlreadyExists(err) {
+			return ctrl.Result{}, fmt.Errorf("recreating VirtualMachineNamespace %s: %w", cloneID, err)
+		}
+		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 
 	allReady := true

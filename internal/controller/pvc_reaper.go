@@ -14,6 +14,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
@@ -381,6 +382,28 @@ func (r *PVCReaper) reapOrphanedVMNS(ctx context.Context, ns string, isLive func
 		switch vmns.Spec.OwnerRef.Kind {
 		case "VirtualMachineClone":
 			cloneID := vmns.Name
+			// A clone that is still provisioning must never look orphaned, even when
+			// status.cloneID has not been persisted yet. handlePending creates the
+			// VirtualMachineNamespace record BEFORE it persists status.cloneID on the
+			// clone CR, so a sweep landing in that window sees no ID in the maps below
+			// (the PVCs and VMs also do not exist yet) and can mistake the brand-new
+			// record for an orphan. Resolve the referenced clone CR directly instead of
+			// trusting only the ID-stamped liveness maps. A completed clone still falls
+			// through to the ID/VM/PVC-based checks so its VMNS can still be reclaimed
+			// once its VMs and PVCs are gone.
+			owner := &v1alpha1.VirtualMachineClone{}
+			err := r.Reader.Get(ctx, types.NamespacedName{
+				Namespace: vmns.Spec.OwnerRef.Namespace,
+				Name:      vmns.Spec.OwnerRef.Name,
+			}, owner)
+			if err != nil {
+				if !apierrors.IsNotFound(err) {
+					return err
+				}
+			} else if owner.Status.CompletionTime == nil {
+				// Clone CR exists and is still in progress — live regardless of ID stamp.
+				continue
+			}
 			if isLive(cloneID) {
 				continue
 			}

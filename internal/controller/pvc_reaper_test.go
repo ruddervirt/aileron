@@ -333,3 +333,64 @@ func TestReaper_ReapsOrphanedVMNS(t *testing.T) {
 		t.Error("build-owned VirtualMachineNamespace whose build CR is still live was wrongly deleted")
 	}
 }
+
+// TestReaper_KeepsVMNS_InProgressCloneCreationWindow guards the clone-created VMNS
+// race: handlePending creates the VirtualMachineNamespace record BEFORE it persists
+// status.cloneID on the VirtualMachineClone CR. A reaper sweep in that window sees no
+// ID in the live maps (no PVCs, no VMs exist yet) and would otherwise mistake the
+// brand-new record for an orphan and delete it — which is exactly what happened to
+// preview clone blue-veil-z6rhv46l-k8cs9-clone-hzbcg in production. The reaper must
+// resolve the referenced clone CR itself and keep the VMNS while that clone is still
+// in progress, regardless of whether its ID is stamped yet. A completed clone with no
+// VMs and no PVCs must still be reclaimed as before.
+func TestReaper_KeepsVMNS_InProgressCloneCreationWindow(t *testing.T) {
+	inProgressClone := &v1alpha1.VirtualMachineClone{
+		ObjectMeta: metav1.ObjectMeta{Name: "clone-provisioning", Namespace: reaperNS},
+		Status:     v1alpha1.VirtualMachineCloneStatus{Phase: v1alpha1.ClonePhaseVolumeProvisioning},
+		// Status.CloneID deliberately left empty — the creation window the bug lives in.
+	}
+	nonCompletedTime := metav1.Now()
+	inProgressClone.Status.StartTime = &nonCompletedTime
+
+	nascentVMNS := &v1alpha1.VirtualMachineNamespace{
+		ObjectMeta: metav1.ObjectMeta{Name: "ns-fresh", Namespace: reaperNS, Labels: map[string]string{cloneLabel: "ns-fresh"}},
+		Spec: v1alpha1.VirtualMachineNamespaceSpec{OwnerRef: &v1alpha1.VirtualMachineNamespaceOwnerRef{
+			Kind: "VirtualMachineClone", Name: "clone-provisioning", Namespace: reaperNS,
+		}},
+	}
+
+	completedClone := &v1alpha1.VirtualMachineClone{
+		ObjectMeta: metav1.ObjectMeta{Name: "clone-done", Namespace: reaperNS},
+		Status: v1alpha1.VirtualMachineCloneStatus{
+			Phase:          v1alpha1.ClonePhaseReady,
+			CloneID:        "ns-done",
+			CompletionTime: &nonCompletedTime,
+		},
+	}
+	doneVMNS := &v1alpha1.VirtualMachineNamespace{
+		ObjectMeta: metav1.ObjectMeta{Name: "ns-done", Namespace: reaperNS, Labels: map[string]string{cloneLabel: "ns-done"}},
+		Spec: v1alpha1.VirtualMachineNamespaceSpec{OwnerRef: &v1alpha1.VirtualMachineNamespaceOwnerRef{
+			Kind: "VirtualMachineClone", Name: "clone-done", Namespace: reaperNS,
+		}},
+	}
+
+	c := fake.NewClientBuilder().
+		WithScheme(reaperScheme(t)).
+		WithObjects(inProgressClone, nascentVMNS, completedClone, doneVMNS).
+		Build()
+
+	if err := newReaper(c).sweep(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	vmnsExists := func(name string) bool {
+		got := &v1alpha1.VirtualMachineNamespace{}
+		return c.Get(context.Background(), types.NamespacedName{Name: name, Namespace: reaperNS}, got) == nil
+	}
+	if !vmnsExists("ns-fresh") {
+		t.Error("VirtualMachineNamespace of an in-progress clone (status.cloneID not stamped yet) was wrongly deleted as an orphan")
+	}
+	if vmnsExists("ns-done") {
+		t.Error("VirtualMachineNamespace of a completed clone with no VMs or PVCs was not reclaimed")
+	}
+}

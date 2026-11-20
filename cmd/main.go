@@ -222,6 +222,7 @@ func main() {
 		Client:          mgr.GetClient(),
 		Scheme:          mgr.GetScheme(),
 		RESTConfig:      mgr.GetConfig(),
+		APIReader:       mgr.GetAPIReader(),
 		DefaultCloneTTL: envDuration("CLONE_DEFAULT_TTL"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "VirtualMachineClone")
