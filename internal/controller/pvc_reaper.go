@@ -263,7 +263,7 @@ func pvcExpiredBefore(pvc *corev1.PersistentVolumeClaim, cutoff time.Time) bool 
 // the CR, is what should be trusted once provisioning is done.
 func (r *PVCReaper) liveCloneCRIDs(ctx context.Context) (map[string]struct{}, error) {
 	clones := &v1alpha1.VirtualMachineCloneList{}
-	if err := r.Reader.List(ctx, clones); err != nil {
+	if err := r.Reader.List(ctx, clones, client.InNamespace(OperatorNamespace())); err != nil {
 		return nil, err
 	}
 	live := make(map[string]struct{}, len(clones.Items))
@@ -337,7 +337,7 @@ func (r *PVCReaper) vmState(ctx context.Context, ns string) (cloneIDs map[string
 // (reapOrphanedVMNS) is orphaned.
 func (r *PVCReaper) liveBuildNames(ctx context.Context) (map[string]struct{}, error) {
 	builds := &v1alpha1.VirtualMachineBuildList{}
-	if err := r.Reader.List(ctx, builds); err != nil {
+	if err := r.Reader.List(ctx, builds, client.InNamespace(OperatorNamespace())); err != nil {
 		return nil, err
 	}
 	live := make(map[string]struct{}, len(builds.Items))

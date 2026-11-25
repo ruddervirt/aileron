@@ -119,11 +119,12 @@ metadata:
     app.kubernetes.io/component: aileron-ui
 ---
 # Least-privilege role: the UI only lists/creates/deletes builds & clones and
-# reads namespaces. It does NOT get the manager's broad cluster permissions.
+# reads pods. It does NOT get the manager's broad cluster permissions.
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
+kind: Role
 metadata:
   name: {{ include "aileron.fullname" . }}-aileron-ui
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "aileron.labels" . | nindent 4 }}
 rules:
@@ -144,7 +145,6 @@ rules:
   - apiGroups:
       - ""
     resources:
-      - namespaces
       - pods
     verbs:
       - get
@@ -174,14 +174,15 @@ rules:
       - update
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+kind: RoleBinding
 metadata:
   name: {{ include "aileron.fullname" . }}-aileron-ui
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "aileron.labels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
+  kind: Role
   name: {{ include "aileron.fullname" . }}-aileron-ui
 subjects:
   - kind: ServiceAccount

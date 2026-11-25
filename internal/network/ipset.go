@@ -20,10 +20,13 @@ import (
 
 const (
 	ovnSubnetsIPSet = "ovn40subnets"
-	ovnOVSNamespace = "kube-system"
-	ovnOVSLabel     = "app=ovs"
+	OVNOVSNamespace = "kube-system"
 	ovnOVSContainer = "openvswitch"
 )
+
+// OVNOVSPodLabels selects the kube-ovn OVS pods in OVNOVSNamespace. The
+// manager cache and the kube-system Role are scoped to these pods only.
+var OVNOVSPodLabels = map[string]string{"app": "ovs"}
 
 // EnsureIPSetEntry adds a CIDR to the ovn40subnets ipset on all nodes.
 // This is needed because KubeOVN only adds default overlay subnets to the ipset,
@@ -87,14 +90,14 @@ func modifyIPSet(ctx context.Context, k8sClient client.Client, restConfig *rest.
 	// List all kube-ovn OVS pods.
 	var podList corev1.PodList
 	if err := k8sClient.List(ctx, &podList,
-		client.InNamespace(ovnOVSNamespace),
-		client.MatchingLabels{"app": "ovs"},
+		client.InNamespace(OVNOVSNamespace),
+		client.MatchingLabels(OVNOVSPodLabels),
 	); err != nil {
 		return fmt.Errorf("listing OVS pods: %w", err)
 	}
 
 	if len(podList.Items) == 0 {
-		return fmt.Errorf("no OVS pods found in %s", ovnOVSNamespace)
+		return fmt.Errorf("no OVS pods found in %s", OVNOVSNamespace)
 	}
 
 	clientset, err := kubernetes.NewForConfig(restConfig)

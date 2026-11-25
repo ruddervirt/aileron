@@ -7,6 +7,82 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - namespaces
+  verbs:
+  - create
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - persistentvolumes
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - kubeovn.io
+  resources:
+  - subnets
+  - vpcs
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - kubevirt.io
+  resources:
+  - kubevirts
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - rolebindings
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - watch
+- apiGroups:
+  - snapshot.storage.k8s.io
+  resources:
+  - volumesnapshotclasses
+  - volumesnapshotcontents
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - watch
+- apiGroups:
+  - storage.k8s.io
+  resources:
+  - storageclasses
+  verbs:
+  - get
+  - list
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: manager-role
+  namespace: ruddervirt-system
+rules:
+- apiGroups:
+  - ""
+  resources:
   - configmaps
   verbs:
   - create
@@ -18,29 +94,10 @@ rules:
 - apiGroups:
   - ""
   resources:
-  - namespaces
-  verbs:
-  - create
-  - get
-  - list
-  - watch
-- apiGroups:
-  - ""
-  resources:
   - persistentvolumeclaims
   verbs:
   - create
   - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - ""
-  resources:
-  - persistentvolumes
-  verbs:
   - get
   - list
   - patch
@@ -107,9 +164,7 @@ rules:
 - apiGroups:
   - kubeovn.io
   resources:
-  - subnets
   - vpc-egress-gateways
-  - vpcs
   verbs:
   - create
   - delete
@@ -118,15 +173,6 @@ rules:
   - patch
   - update
   - watch
-- apiGroups:
-  - kubevirt.io
-  resources:
-  - kubevirts
-  verbs:
-  - get
-  - list
-  - patch
-  - update
 - apiGroups:
   - kubevirt.io
   resources:
@@ -151,16 +197,6 @@ rules:
   - networking.k8s.io
   resources:
   - networkpolicies
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - watch
-- apiGroups:
-  - rbac.authorization.k8s.io
-  resources:
-  - rolebindings
   verbs:
   - create
   - delete
@@ -204,8 +240,6 @@ rules:
 - apiGroups:
   - snapshot.storage.k8s.io
   resources:
-  - volumesnapshotclasses
-  - volumesnapshotcontents
   - volumesnapshots
   verbs:
   - create
@@ -213,13 +247,6 @@ rules:
   - get
   - list
   - watch
-- apiGroups:
-  - storage.k8s.io
-  resources:
-  - storageclasses
-  verbs:
-  - get
-  - list
 - apiGroups:
   - subresources.kubevirt.io
   resources:

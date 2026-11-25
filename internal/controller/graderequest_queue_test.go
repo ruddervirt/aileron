@@ -25,7 +25,7 @@ import (
 
 const (
 	gradeOperatorNS = "ruddervirt-system"
-	gradeTargetNS   = "target-ns"
+	gradeTargetNS   = "ruddervirt-system" // grading only targets the operator namespace
 )
 
 // countingReader wraps an uncached reader and counts List calls so tests can

@@ -1,0 +1,66 @@
+{{- if not (semverCompare ">=1.30.0-0" .Capabilities.KubeVersion.Version) }}
+{{- fail "aileron requires Kubernetes 1.30 or later (ValidatingAdmissionPolicy v1)" }}
+{{- end }}
+# The API server refuses Aileron objects that point outside the release
+# namespace. Aileron's RBAC and cache are scoped to this namespace, so such
+# objects could never work. This policy rejects them at create or update time
+# with a clear message, even when the controller is not running.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ include "aileron.fullname" . }}-namespace-scope
+  labels:
+    {{- include "aileron.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [ruddervirt.io]
+        apiVersions: ["*"]
+        operations: [CREATE, UPDATE]
+        resources: [virtualmachinebuilds, virtualmachineclones, virtualmachinenamespaces, graderequests]
+  # Never block finalizer removal on an object that is already being deleted.
+  matchConditions:
+    - name: not-deleting
+      expression: "!has(object.metadata.deletionTimestamp)"
+  variables:
+    - name: ns
+      expression: "'{{ .Release.Namespace }}'"
+    - name: kind
+      expression: "request.resource.resource"
+  validations:
+    - expression: "request.namespace == variables.ns"
+      messageExpression: "'Aileron resources must be created in namespace ' + variables.ns"
+      reason: Forbidden
+    - expression: >-
+        variables.kind != 'graderequests' ||
+        !has(object.spec.namespace) || object.spec.namespace == variables.ns
+      messageExpression: "'GradeRequest spec.namespace must be ' + variables.ns"
+      reason: Forbidden
+    - expression: >-
+        !(variables.kind in ['virtualmachinebuilds', 'virtualmachineclones']) ||
+        !has(object.spec.namespace) || object.spec.namespace == variables.ns
+      messageExpression: "'spec.namespace must be empty or ' + variables.ns"
+      reason: Forbidden
+    - expression: >-
+        variables.kind != 'virtualmachinebuilds' || !has(object.spec.vms) ||
+        object.spec.vms.all(v, !has(v.source) || (
+          (!has(v.source.buildRef) || !has(v.source.buildRef.namespace) || v.source.buildRef.namespace == variables.ns) &&
+          (!has(v.source.sourcePvc) || !has(v.source.sourcePvc.namespace) || v.source.sourcePvc.namespace == variables.ns)))
+      messageExpression: "'spec.vms[].source.buildRef.namespace and sourcePvc.namespace must be ' + variables.ns"
+      reason: Forbidden
+    - expression: >-
+        variables.kind != 'virtualmachinebuilds' || !has(object.spec.output) || !has(object.spec.output.vms) ||
+        object.spec.output.vms.all(o, !has(o.dataVolume) || !has(o.dataVolume.namespace) || o.dataVolume.namespace == variables.ns)
+      messageExpression: "'spec.output.vms[].dataVolume.namespace must be ' + variables.ns"
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ include "aileron.fullname" . }}-namespace-scope
+  labels:
+    {{- include "aileron.labels" . | nindent 4 }}
+spec:
+  policyName: {{ include "aileron.fullname" . }}-namespace-scope
+  validationActions: [Deny]

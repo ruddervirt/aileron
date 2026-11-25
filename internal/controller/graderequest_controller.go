@@ -152,20 +152,30 @@ type GradeRequestReconciler struct {
 	powerOff func(ctx context.Context, namespace, vmName string) error
 }
 
-// +kubebuilder:rbac:groups=ruddervirt.io,resources=graderequests,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=ruddervirt.io,resources=graderequests/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=ruddervirt.io,resources=graderequests/finalizers,verbs=update
-// +kubebuilder:rbac:groups=kubevirt.io,resources=virtualmachines,verbs=get;list;watch
-// +kubebuilder:rbac:groups=kubevirt.io,resources=virtualmachineinstances,verbs=get;list;watch
-// +kubebuilder:rbac:groups=subresources.kubevirt.io,resources=virtualmachines/start;virtualmachines/stop,verbs=update
-// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
-// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list
-// +kubebuilder:rbac:groups="",resources=pods/log,verbs=get;list
+// +kubebuilder:rbac:groups=ruddervirt.io,resources=graderequests,verbs=get;list;watch;create;update;patch;delete,namespace=ruddervirt-system
+// +kubebuilder:rbac:groups=ruddervirt.io,resources=graderequests/status,verbs=get;update;patch,namespace=ruddervirt-system
+// +kubebuilder:rbac:groups=ruddervirt.io,resources=graderequests/finalizers,verbs=update,namespace=ruddervirt-system
+// +kubebuilder:rbac:groups=kubevirt.io,resources=virtualmachines,verbs=get;list;watch,namespace=ruddervirt-system
+// +kubebuilder:rbac:groups=kubevirt.io,resources=virtualmachineinstances,verbs=get;list;watch,namespace=ruddervirt-system
+// +kubebuilder:rbac:groups=subresources.kubevirt.io,resources=virtualmachines/start;virtualmachines/stop,verbs=update,namespace=ruddervirt-system
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete,namespace=ruddervirt-system
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list,namespace=ruddervirt-system
+// +kubebuilder:rbac:groups="",resources=pods/log,verbs=get;list,namespace=ruddervirt-system
 
 func (r *GradeRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	gr := &v1alpha1.GradeRequest{}
 	if err := r.Get(ctx, req.NamespacedName, gr); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	// Aileron only operates inside its own namespace. The chart's
+	// ValidatingAdmissionPolicy rejects these objects at the API server; this
+	// is defense in depth in case the policy is missing.
+	if msg := gradeNamespaceViolation(gr, OperatorNamespace()); msg != "" {
+		if gr.Status.Phase == v1alpha1.GradeRequestPhaseFailed {
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{}, r.failGradeRequest(ctx, gr, msg)
 	}
 
 	if err := r.reconcile(ctx, gr); err != nil {
@@ -689,7 +699,7 @@ func (r *GradeRequestReconciler) driveGradeVM(ctx context.Context, gr *v1alpha1.
 		return true, nil
 	}
 
-	existing, err := r.findRunningJobForVM(ctx, gr.Namespace, gr.Spec.Namespace, vm.Name)
+	existing, err := r.findRunningJobForVM(ctx, OperatorNamespace(), gr.Spec.Namespace, vm.Name)
 	if err != nil {
 		return false, fmt.Errorf("check existing jobs for VM %s: %w", vm.Name, err)
 	}
@@ -702,7 +712,7 @@ func (r *GradeRequestReconciler) driveGradeVM(ctx context.Context, gr *v1alpha1.
 	if err != nil {
 		return false, fmt.Errorf("build job for VM %s: %w", vm.Name, err)
 	}
-	if _, err := r.Clientset.BatchV1().Jobs(gr.Namespace).Create(ctx, job, metav1.CreateOptions{}); err != nil {
+	if _, err := r.Clientset.BatchV1().Jobs(OperatorNamespace()).Create(ctx, job, metav1.CreateOptions{}); err != nil {
 		vmStatus.Phase = v1alpha1.GradeRequestPhaseFailed
 		vmStatus.Message = fmt.Sprintf("failed to create job: %v", err)
 		r.powerOffIfAutoStarted(ctx, gr, vmStatus)
@@ -751,7 +761,7 @@ func (r *GradeRequestReconciler) handleRunningPhase(ctx context.Context, gr *v1a
 			continue
 		}
 
-		job, err := r.Clientset.BatchV1().Jobs(gr.Namespace).Get(ctx, vmStatus.JobName, metav1.GetOptions{})
+		job, err := r.Clientset.BatchV1().Jobs(OperatorNamespace()).Get(ctx, vmStatus.JobName, metav1.GetOptions{})
 		if err != nil {
 			return fmt.Errorf("get job %s: %w", vmStatus.JobName, err)
 		}
@@ -867,7 +877,7 @@ func (r *GradeRequestReconciler) powerOffIfAutoStarted(ctx context.Context, gr *
 	}
 	// Another grade request may have an active job against this VM; powering
 	// it off would kill that grade mid-flight. Leave the VM running.
-	if other, err := r.findRunningJobForVM(ctx, gr.Namespace, gr.Spec.Namespace, vmStatus.Name); err == nil && other != "" && other != vmStatus.JobName {
+	if other, err := r.findRunningJobForVM(ctx, OperatorNamespace(), gr.Spec.Namespace, vmStatus.Name); err == nil && other != "" && other != vmStatus.JobName {
 		log.Info("leaving auto-started VM running: another grade job is active", "gradeRequest", gr.Name, "vm", vmStatus.Name, "activeJob", other)
 		vmStatus.PoweredOff = true
 		return true
@@ -915,7 +925,7 @@ func (r *GradeRequestReconciler) buildJobForVM(gr *v1alpha1.GradeRequest, vm *v1
 			// the 63-char cap that Kubernetes enforces on the auto-injected
 			// job-name pod label.
 			Name:      fmt.Sprintf("%s-%s", gr.Name, shortVMHash(vm.Name)),
-			Namespace: gr.Namespace,
+			Namespace: OperatorNamespace(),
 			Labels: map[string]string{
 				v1alpha1.LabelGradeRequest:  gr.Name,
 				v1alpha1.LabelGradeTargetVM: vm.Name,
@@ -1061,6 +1071,18 @@ func (r *GradeRequestReconciler) cleanupIfExpired(ctx context.Context, gr *v1alp
 		return fmt.Errorf("delete completed grade request %s/%s: %w", gr.Namespace, gr.Name, err)
 	}
 	return nil
+}
+
+// gradeNamespaceViolation returns a failure message when the GradeRequest or
+// its target VMs are outside the operator namespace, or "" when both are inside.
+func gradeNamespaceViolation(gr *v1alpha1.GradeRequest, operatorNS string) string {
+	if gr.Namespace != operatorNS {
+		return fmt.Sprintf("GradeRequest must be created in namespace %s", operatorNS)
+	}
+	if gr.Spec.Namespace != "" && gr.Spec.Namespace != operatorNS {
+		return fmt.Sprintf("spec.namespace must be %s", operatorNS)
+	}
+	return ""
 }
 
 func (r *GradeRequestReconciler) failGradeRequest(ctx context.Context, gr *v1alpha1.GradeRequest, msg string) error {

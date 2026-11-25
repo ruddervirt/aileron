@@ -1,0 +1,134 @@
+# Namespaced manager permissions, bound only in the release namespace.
+# Aileron has no rights on namespaced objects in any other namespace, except
+# the kube-ovn OVS pods in kube-system (see the second Role below).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "aileron.fullname" . }}-manager
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "aileron.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [ruddervirt.io]
+    resources: [virtualmachinebuilds, virtualmachineclones, virtualmachinenamespaces, graderequests]
+    verbs: [create, delete, get, list, patch, update, watch]
+  - apiGroups: [ruddervirt.io]
+    resources:
+      - virtualmachinebuilds/status
+      - virtualmachineclones/status
+      - virtualmachinenamespaces/status
+      - graderequests/status
+    verbs: [get, update, patch]
+  - apiGroups: [ruddervirt.io]
+    resources:
+      - virtualmachinebuilds/finalizers
+      - virtualmachineclones/finalizers
+      - virtualmachinenamespaces/finalizers
+      - graderequests/finalizers
+    verbs: [update]
+  - apiGroups: [kubevirt.io]
+    resources: [virtualmachines]
+    verbs: [create, delete, get, list, patch, update, watch]
+  - apiGroups: [kubevirt.io]
+    resources: [virtualmachineinstances]
+    verbs: [delete, get, list, watch]
+  # KubeVirt subresources for port-forward, VNC, and power control
+  - apiGroups: [subresources.kubevirt.io]
+    resources: [virtualmachineinstances/portforward, virtualmachineinstances/vnc]
+    verbs: [get]
+  - apiGroups: [subresources.kubevirt.io]
+    resources: [virtualmachines/start, virtualmachines/stop]
+    verbs: [update]
+  - apiGroups: [cdi.kubevirt.io]
+    resources: [datavolumes]
+    verbs: [create, delete, get, list, patch, update, watch]
+  - apiGroups: [snapshot.storage.k8s.io]
+    resources: [volumesnapshots]
+    verbs: [create, delete, get, list, watch]
+  - apiGroups: [kubeovn.io]
+    resources: [vpc-egress-gateways]
+    verbs: [create, delete, get, list, update, patch, watch]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, list, watch, create, delete]
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch, create, delete]
+  - apiGroups: [""]
+    resources: [pods/exec]
+    verbs: [create]
+  - apiGroups: [""]
+    resources: [pods/log]
+    verbs: [get, list]
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+  - apiGroups: [events.k8s.io]
+    resources: [events]
+    verbs: [create, patch]
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [get, list, watch, create, delete]
+  - apiGroups: [k8s.cni.cncf.io]
+    resources: [network-attachment-definitions]
+    verbs: [get, list, watch, create, delete]
+  - apiGroups: [networking.k8s.io]
+    resources: [networkpolicies]
+    verbs: [get, list, watch, create, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "aileron.fullname" . }}-manager
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "aileron.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "aileron.fullname" . }}-manager
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "aileron.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+# The ipset code (internal/network/ipset.go) lists the kube-ovn OVS pods in
+# kube-system and runs `ipset` in them. The manager cache watches only pods
+# with the app=ovs label there. RBAC cannot filter by label, so this Role
+# allows all pods in kube-system. kube-system has no KubeVirt VMs.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "aileron.fullname" . }}-ovs-ipset
+  namespace: kube-system
+  labels:
+    {{- include "aileron.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [pods/exec]
+    verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "aileron.fullname" . }}-ovs-ipset
+  namespace: kube-system
+  labels:
+    {{- include "aileron.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "aileron.fullname" . }}-ovs-ipset
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "aileron.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}

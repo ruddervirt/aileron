@@ -200,3 +200,46 @@ func TestBuildJobForVMNameUnder63Chars(t *testing.T) {
 		})
 	}
 }
+
+func TestGradeNamespaceViolation(t *testing.T) {
+	const op = "ruddervirt-system"
+	cases := []struct {
+		name, crNS, targetNS string
+		want                 string
+	}{
+		{"both in operator namespace", op, op, ""},
+		{"empty target is left to the pending check", op, "", ""},
+		{"cr in foreign namespace", "other", op, "GradeRequest must be created in namespace " + op},
+		{"target in foreign namespace", op, "other", "spec.namespace must be " + op},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gr := &v1alpha1.GradeRequest{
+				ObjectMeta: metav1.ObjectMeta{Name: "g", Namespace: tc.crNS},
+				Spec:       v1alpha1.GradeRequestSpec{Namespace: tc.targetNS},
+			}
+			if got := gradeNamespaceViolation(gr, op); got != tc.want {
+				t.Fatalf("gradeNamespaceViolation() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestBuildJobForVMUsesOperatorNamespace(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add v1alpha1 to scheme: %v", err)
+	}
+	r := &GradeRequestReconciler{Scheme: scheme}
+	gr := &v1alpha1.GradeRequest{
+		ObjectMeta: metav1.ObjectMeta{Name: "grade-x", Namespace: OperatorNamespace()},
+		Spec:       v1alpha1.GradeRequestSpec{Namespace: OperatorNamespace()},
+	}
+	job, err := r.buildJobForVM(gr, &v1alpha1.GradeVM{Name: "vm1", Commands: []string{"true"}}, "SERIAL_LINUX")
+	if err != nil {
+		t.Fatalf("buildJobForVM: %v", err)
+	}
+	if job.Namespace != OperatorNamespace() {
+		t.Fatalf("job namespace = %q, want %q", job.Namespace, OperatorNamespace())
+	}
+}

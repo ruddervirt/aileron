@@ -28,7 +28,7 @@ Builds and clones get an ID when first processed, and resources they own are lab
 - A build's ID is `status.buildID`; its namespace defaults to `vm-{uid-hash}` (can be changed with `spec.namespace` or `spec.namespacePrefix`, default `"vm-"`).
 - A clone's ID is `status.cloneID`; its namespace defaults to `ns-{uid-hash}` (can be changed with `spec.namespace`/`spec.namespacePrefix`, default `"ns-"`).
 
-All builds and clones share a single Kubernetes namespace (`ruddervirt-system` by default) — they are isolated by label, unless `spec.namespace` is explicitly set.
+All builds, clones and GradeRequests live in a single Kubernetes namespace (`ruddervirt-system` by default) and are isolated by label. Aileron has no access to VMs outside its own namespace. A ValidatingAdmissionPolicy refuses Aileron objects created in, or pointing at, any other namespace, including `spec.namespace` overrides.
 
 ### Namespace Model
 
@@ -620,7 +620,7 @@ metadata:
   name: check-nginx
   namespace: ruddervirt-system
 spec:
-  namespace: ns-abc123
+  namespace: ruddervirt-system
   vms:
     - name: web
       user: debian
@@ -631,7 +631,7 @@ spec:
 
 ### Anatomy of a Grade Spec
 
-**`spec.namespace`** — the Kubernetes namespace containing the target VMs (usually a clone's `status.cloneNamespace`).
+**`spec.namespace`** — the Kubernetes namespace containing the target VMs. It must be the operator namespace (`ruddervirt-system`), which is also every clone's `status.cloneNamespace`. The API server refuses any other value.
 
 **`spec.vms[]`** — each entry includes `name` (full KubeVirt VM name), `commands[]` (run sequentially over the serial console), `user`/`password` (serial console login), and optional `domain` for domain-joined Windows guests using SAC.
 
@@ -652,7 +652,7 @@ metadata:
   name: check-domain-join
   namespace: ruddervirt-system
 spec:
-  namespace: ns-def456
+  namespace: ruddervirt-system
   vms:
     - name: workstation
       user: labuser
@@ -672,7 +672,7 @@ metadata:
   name: check-server-client
   namespace: ruddervirt-system
 spec:
-  namespace: ns-ghi789
+  namespace: ruddervirt-system
   vms:
     - name: server
       user: debian

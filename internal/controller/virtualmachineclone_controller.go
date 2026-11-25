@@ -49,16 +49,17 @@ const cloneFinalizerName = "ruddervirt.io/clone-finalizer"
 // migration.
 const defaultCloneTTL = 720 * time.Hour
 
-// +kubebuilder:rbac:groups=ruddervirt.io,resources=virtualmachineclones,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=ruddervirt.io,resources=virtualmachineclones/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=ruddervirt.io,resources=virtualmachineclones/finalizers,verbs=update
-// +kubebuilder:rbac:groups=snapshot.storage.k8s.io,resources=volumesnapshots;volumesnapshotcontents;volumesnapshotclasses,verbs=get;list;watch;create;delete
-// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=kubevirt.io,resources=virtualmachines,verbs=get;list;watch;create;delete
-// +kubebuilder:rbac:groups=kubevirt.io,resources=virtualmachineinstances,verbs=get;list;watch
+// +kubebuilder:rbac:groups=ruddervirt.io,resources=virtualmachineclones,verbs=get;list;watch;create;update;patch;delete,namespace=ruddervirt-system
+// +kubebuilder:rbac:groups=ruddervirt.io,resources=virtualmachineclones/status,verbs=get;update;patch,namespace=ruddervirt-system
+// +kubebuilder:rbac:groups=ruddervirt.io,resources=virtualmachineclones/finalizers,verbs=update,namespace=ruddervirt-system
+// +kubebuilder:rbac:groups=snapshot.storage.k8s.io,resources=volumesnapshotcontents;volumesnapshotclasses,verbs=get;list;watch;create;delete
+// +kubebuilder:rbac:groups=snapshot.storage.k8s.io,resources=volumesnapshots,verbs=get;list;watch;create;delete,namespace=ruddervirt-system
+// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete,namespace=ruddervirt-system
+// +kubebuilder:rbac:groups=kubevirt.io,resources=virtualmachines,verbs=get;list;watch;create;delete,namespace=ruddervirt-system
+// +kubebuilder:rbac:groups=kubevirt.io,resources=virtualmachineinstances,verbs=get;list;watch,namespace=ruddervirt-system
 // +kubebuilder:rbac:groups=kubeovn.io,resources=vpcs;subnets,verbs=get;list;watch;create;delete;update;patch
-// +kubebuilder:rbac:groups=kubeovn.io,resources=vpc-egress-gateways,verbs=get;list;watch;create;delete
-// +kubebuilder:rbac:groups=k8s.cni.cncf.io,resources=network-attachment-definitions,verbs=get;list;watch;create;delete
+// +kubebuilder:rbac:groups=kubeovn.io,resources=vpc-egress-gateways,verbs=get;list;watch;create;delete,namespace=ruddervirt-system
+// +kubebuilder:rbac:groups=k8s.cni.cncf.io,resources=network-attachment-definitions,verbs=get;list;watch;create;delete,namespace=ruddervirt-system
 
 // VirtualMachineCloneReconciler reconciles VirtualMachineClone objects.
 type VirtualMachineCloneReconciler struct {
